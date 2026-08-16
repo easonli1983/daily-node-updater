@@ -21,11 +21,9 @@ jobs:
         run: |
           python - <<'PY'
           import base64
-          import concurrent.futures
           import json
           import re
           import time
-          import urllib.parse
           import urllib.request
 
           SOURCES = [
@@ -52,27 +50,52 @@ jobs:
               "hy2://",
           )
 
-          def fetch(url):
-              req = urllib.request.Request(
-                  url,
-                  headers={
-                      "User-Agent": "Mozilla/5.0 Daily-Node-Updater"
-                  }
-              )
+          def fetch_source(url):
 
-              with urllib.request.urlopen(
-                  req,
-                  timeout=20
-              ) as response:
-                  return response.read()
+              try:
+
+                  request = urllib.request.Request(
+                      url,
+                      headers={
+                          "User-Agent":
+                              "Mozilla/5.0 "
+                              "(Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 "
+                              "Chrome/131.0 Safari/537.36",
+                          "Accept":
+                              "*/*"
+                      }
+                  )
+
+                  with urllib.request.urlopen(
+                      request,
+                      timeout=20
+                  ) as response:
+
+                      return response.read()
+
+              except Exception as e:
+
+                  print("")
+                  print("⚠️ 源访问失败，跳过：")
+                  print(url)
+                  print("原因：", str(e))
+                  print("")
+
+                  return b""
 
           def decode_base64(text):
+
               try:
+
                   compact = re.sub(
                       r"\s+",
                       "",
                       text
                   )
+
+                  if len(compact) < 20:
+                      return text
 
                   padded = compact + "=" * (
                       -len(compact) % 4
@@ -87,8 +110,8 @@ jobs:
                   )
 
                   if any(
-                      x in decoded
-                      for x in PREFIXES
+                      prefix in decoded
+                      for prefix in PREFIXES
                   ):
                       return decoded
 
@@ -98,6 +121,7 @@ jobs:
               return text
 
           def extract_nodes(text):
+
               text = decode_base64(text)
 
               result = []
@@ -107,53 +131,88 @@ jobs:
                   line = line.strip()
 
                   if line.startswith(PREFIXES):
+
                       result.append(line)
 
               return result
 
+          print("================================")
+          print("开始获取节点")
+          print("================================")
+
           all_nodes = []
 
-          print("开始抓取节点源……")
+          success_sources = 0
+          failed_sources = 0
 
           for source in SOURCES:
 
-              try:
+              print("")
+              print("正在获取：")
+              print(source)
 
-                  raw = fetch(source)
+              raw = fetch_source(source)
 
-                  text = raw.decode(
-                      "utf-8",
-                      errors="ignore"
-                  )
+              if not raw:
 
-                  nodes = extract_nodes(text)
+                  failed_sources += 1
+                  continue
+
+              text = raw.decode(
+                  "utf-8",
+                  errors="ignore"
+              )
+
+              nodes = extract_nodes(text)
+
+              if nodes:
+
+                  success_sources += 1
 
                   print(
-                      "成功：",
-                      source,
-                      "→",
+                      "✅ 获取成功：",
                       len(nodes),
                       "个节点"
                   )
 
                   all_nodes.extend(nodes)
 
-              except Exception as e:
+              else:
 
                   print(
-                      "失败：",
-                      source,
-                      "→",
-                      str(e)
+                      "⚠️ 获取成功，但没有识别到节点"
                   )
 
+          print("")
+          print("================================")
+          print("源统计")
+          print("================================")
+
           print(
-              "总抓取数量：",
+              "总来源：",
+              len(SOURCES)
+          )
+
+          print(
+              "成功来源：",
+              success_sources
+          )
+
+          print(
+              "失败来源：",
+              failed_sources
+          )
+
+          print(
+              "抓取节点：",
               len(all_nodes)
           )
 
+          # ==========================
           # 去重
-          unique = []
+          # ==========================
+
+          unique_nodes = []
           seen = set()
 
           for node in all_nodes:
@@ -167,71 +226,119 @@ jobs:
                   continue
 
               seen.add(node)
-              unique.append(node)
+              unique_nodes.append(node)
 
           print(
-              "去重后数量：",
-              len(unique)
+              "去重后节点：",
+              len(unique_nodes)
           )
 
-          # 基础有效性筛选
-          valid = []
+          # ==========================
+          # 基础有效性检查
+          # ==========================
 
-          for node in unique:
+          valid_nodes = []
 
-              try:
+          for node in unique_nodes:
 
-                  parsed = urllib.parse.urlparse(
-                      node
-                  )
-
-                  if node.startswith(
-                      "vmess://"
-                  ):
-                      valid.append(node)
-                      continue
-
-                  if (
-                      parsed.hostname
-                      and parsed.port
-                  ):
-                      valid.append(node)
-
-              except Exception:
+              if not node.startswith(
+                  PREFIXES
+              ):
                   continue
+
+              # 去掉明显异常的超长内容
+              if len(node) > 5000:
+                  continue
+
+              valid_nodes.append(node)
 
           print(
               "基础有效节点：",
-              len(valid)
+              len(valid_nodes)
           )
 
-          # 为了避免单一来源占满结果，
-          # 按稳定顺序打散后取前 100 个。
-          #
-          # 这里不做全量 TCP 测试，
-          # 避免 GitHub Actions 长时间运行。
+          # ==========================
+          # 最终最多保留100个
+          # ==========================
 
-          valid = valid[:MAX_NODES]
+          final_nodes = valid_nodes[
+              :MAX_NODES
+          ]
+
+          print("")
+          print("================================")
+          print("最终结果")
+          print("================================")
 
           print(
-              "最终保留：",
-              len(valid)
+              "最终节点数量：",
+              len(final_nodes)
           )
 
-          # 明文节点
-          plain = "\n".join(valid)
+          # ==========================
+          # 如果没有节点
+          # ==========================
+
+          if len(final_nodes) == 0:
+
+              print("")
+              print(
+                  "❌ 没有获得任何有效节点。"
+              )
+
+              # 不覆盖原来的有效订阅
+              # 让本次 Actions 正常结束
+              # 避免因为某个源临时故障导致
+              # 你的订阅变成空文件。
+
+              with open(
+                  "daily-report.md",
+                  "w",
+                  encoding="utf-8"
+              ) as f:
+
+                  f.write(
+                      "# Daily Node Update\n\n"
+                      "⚠️ 本次没有获取到有效节点。\n\n"
+                      "原订阅文件保持不变。\n"
+                  )
+
+              with open(
+                  "send-email.txt",
+                  "w",
+                  encoding="utf-8"
+              ) as f:
+
+                  f.write("no")
+
+              raise SystemExit(0)
+
+          # ==========================
+          # 写入 nodes.txt
+          # ==========================
+
+          plain_text = "\n".join(
+              final_nodes
+          )
 
           with open(
               "public/nodes.txt",
               "w",
               encoding="utf-8"
           ) as f:
-              f.write(plain)
+
+              f.write(
+                  plain_text
+              )
+
               f.write("\n")
 
+          # ==========================
           # Base64 订阅
+          # ==========================
+
           encoded = base64.b64encode(
-              plain.encode("utf-8")
+              plain_text.encode("utf-8")
           ).decode("utf-8")
 
           with open(
@@ -239,29 +346,30 @@ jobs:
               "w",
               encoding="utf-8"
           ) as f:
+
               f.write(encoded)
               f.write("\n")
 
+          # ==========================
+          # 生成报告
+          # ==========================
+
+          current_time = time.strftime(
+              "%Y-%m-%d %H:%M:%S UTC"
+          )
+
           report = (
-              "Daily Node Update\n\n"
-              "更新时间："
-              + time.strftime(
-                  "%Y-%m-%d %H:%M:%S UTC"
-              )
-              + "\n\n"
-              "来源数量："
-              + str(len(SOURCES))
-              + "\n"
-              "抓取节点："
-              + str(len(all_nodes))
-              + "\n"
-              "去重后："
-              + str(len(unique))
-              + "\n"
-              "有效节点："
-              + str(len(valid))
-              + "\n"
-              "最终订阅：最多 100 个节点\n"
+              "# Daily Node Update\n\n"
+              f"更新时间：{current_time}\n\n"
+              f"来源数量：{len(SOURCES)}\n\n"
+              f"成功来源：{success_sources}\n\n"
+              f"失败来源：{failed_sources}\n\n"
+              f"抓取节点：{len(all_nodes)}\n\n"
+              f"去重后：{len(unique_nodes)}\n\n"
+              f"有效节点：{len(valid_nodes)}\n\n"
+              f"最终订阅：{len(final_nodes)} 个节点\n\n"
+              "订阅地址：\n"
+              "https://twit2er.github.io/daily-node-updater/sub.txt\n"
           )
 
           with open(
@@ -269,6 +377,7 @@ jobs:
               "w",
               encoding="utf-8"
           ) as f:
+
               f.write(report)
 
           with open(
@@ -276,25 +385,53 @@ jobs:
               "w",
               encoding="utf-8"
           ) as f:
+
               json.dump(
                   {
-                      "sources": len(SOURCES),
-                      "fetched": len(all_nodes),
-                      "unique": len(unique),
-                      "valid": len(valid),
-                      "time": time.time()
+                      "sources":
+                          len(SOURCES),
+                      "success_sources":
+                          success_sources,
+                      "failed_sources":
+                          failed_sources,
+                      "fetched":
+                          len(all_nodes),
+                      "unique":
+                          len(unique_nodes),
+                      "valid":
+                          len(valid_nodes),
+                      "final":
+                          len(final_nodes),
+                      "updated_at":
+                          current_time
                   },
                   f,
                   ensure_ascii=False,
                   indent=2
               )
 
+          # 通知邮件步骤
+          with open(
+              "send-email.txt",
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              f.write("yes")
+
+          print("")
           print(report)
 
           PY
 
       - name: Send subscription email
+        if: success()
         run: |
+          if [ "$(cat send-email.txt)" != "yes" ]; then
+            echo "没有有效节点，本次不发送邮件。"
+            exit 0
+          fi
+
           python - <<'PY'
           import os
           import json
@@ -306,65 +443,98 @@ jobs:
               "r",
               encoding="utf-8"
           ) as f:
+
               report = f.read()
 
           with open(
               "public/sub.txt",
               "rb"
           ) as f:
+
               attachment = base64.b64encode(
                   f.read()
               ).decode("utf-8")
 
           data = {
-              "from": "Daily Node Update <onboarding@resend.dev>",
+
+              "from":
+                  "Daily Node Update <onboarding@resend.dev>",
+
               "to": [
                   "easonli1983@gmail.com"
               ],
+
               "subject":
-                  "Daily Node Update｜最新100节点订阅",
+                  "Daily Node Update｜最新节点订阅",
+
               "html":
                   "<h2>🟢 Daily Node Update</h2>"
                   "<pre>"
                   + report
                   + "</pre>"
-                  "<p>最新节点订阅已生成。</p>"
+                  "<p>最新100个节点订阅已生成。</p>"
                   "<p>附件：sub.txt</p>",
+
               "attachments": [
                   {
-                      "filename": "sub.txt",
-                      "content": attachment
+                      "filename":
+                          "sub.txt",
+
+                      "content":
+                          attachment
                   }
               ]
           }
 
           request = urllib.request.Request(
+
               "https://api.resend.com/emails",
+
               data=json.dumps(
                   data
               ).encode("utf-8"),
+
               headers={
+
                   "Authorization":
                       "Bearer "
                       + os.environ[
                           "RESEND_API_KEY"
                       ],
+
                   "Content-Type":
                       "application/json"
               },
+
               method="POST"
           )
 
-          with urllib.request.urlopen(
-              request,
-              timeout=30
-          ) as response:
+          try:
+
+              with urllib.request.urlopen(
+                  request,
+                  timeout=30
+              ) as response:
+
+                  print(
+                      "📧 邮件发送成功："
+                  )
+
+                  print(
+                      response.read().decode(
+                          "utf-8"
+                      )
+                  )
+
+          except Exception as e:
 
               print(
-                  response.read().decode(
-                      "utf-8"
-                  )
+                  "⚠️ 邮件发送失败：",
+                  str(e)
               )
+
+              # 邮件失败不让整个节点更新任务失败
+              # 节点文件仍然正常更新
 
           PY
 
@@ -381,6 +551,9 @@ jobs:
           git add daily-report.md
           git add node-stats.json
 
-          git diff --cached --quiet || git commit -m "Update node subscription"
-
-          git push
+          if git diff --cached --quiet; then
+            echo "没有新的文件变化。"
+          else
+            git commit -m "Update node subscription"
+            git push
+          fi
