@@ -1,0 +1,203 @@
+name: Shadowrocket Node Updater
+
+on:
+  schedule:
+    - cron: "0 0,8,16 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download public node sources
+        run: |
+          set -e
+
+          mkdir -p node_sources
+
+          curl -L --retry 3 --connect-timeout 15 --max-time 60 \
+            "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt" \
+            -o node_sources/zhuhai.txt
+
+          curl -L --retry 3 --connect-timeout 15 --max-time 60 \
+            "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub" \
+            -o node_sources/pawdroid.txt
+
+      - name: Merge and deduplicate nodes
+        run: |
+          python - <<'PY'
+          import base64
+          import re
+          from pathlib import Path
+
+          source_dir = Path("node_sources")
+
+          prefixes = (
+              "ss://",
+              "ssr://",
+              "vmess://",
+              "vless://",
+              "trojan://",
+              "hysteria://",
+              "hysteria2://",
+              "tuic://",
+              "socks://",
+              "socks5://"
+          )
+
+          nodes = []
+          seen = set()
+
+          for file in source_dir.glob("*.txt"):
+              raw = file.read_text(
+                  encoding="utf-8",
+                  errors="ignore"
+              )
+
+              # 尝试直接读取
+              for line in raw.splitlines():
+                  line = line.strip()
+
+                  if line.startswith(prefixes):
+                      if line not in seen:
+                          seen.add(line)
+                          nodes.append(line)
+
+              # 如果文件是 Base64，则尝试解码
+              try:
+                  compact = "".join(raw.split())
+                  decoded = base64.b64decode(
+                      compact + "=" * (-len(compact) % 4),
+                      validate=False
+                  ).decode(
+                      "utf-8",
+                      errors="ignore"
+                  )
+
+                  for line in decoded.splitlines():
+                      line = line.strip()
+
+                      if line.startswith(prefixes):
+                          if line not in seen:
+                              seen.add(line)
+                              nodes.append(line)
+
+              except Exception:
+                  pass
+
+          # 再做一次格式过滤
+          valid = []
+
+          for node in nodes:
+              if len(node) < 20:
+                  continue
+
+              if any(
+                  node.startswith(prefix)
+                  for prefix in prefixes
+              ):
+                  valid.append(node)
+
+          Path("sub.txt").write_text(
+              "\n".join(valid) + "\n",
+              encoding="utf-8"
+          )
+
+          # Shadowrocket 通用 Base64 订阅
+          encoded = base64.b64encode(
+              "\n".join(valid).encode("utf-8")
+          ).decode("ascii")
+
+          Path("sub-base64.txt").write_text(
+              encoded,
+              encoding="utf-8"
+          )
+
+          print(f"抓取节点：{len(valid)}")
+          PY
+
+      - name: Create subscription page
+        run: |
+          mkdir -p public
+
+          cp sub-base64.txt public/sub.txt
+
+          python - <<'PY'
+          from pathlib import Path
+          from datetime import datetime, timezone
+
+          count = 0
+
+          try:
+              text = Path("sub.txt").read_text(
+                  encoding="utf-8"
+              )
+
+              count = len([
+                  x for x in text.splitlines()
+                  if x.strip()
+              ])
+          except Exception:
+              pass
+
+          html = f"""
+          <!doctype html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>Shadowrocket Node Subscription</title>
+          </head>
+          <body>
+            <h1>Shadowrocket Node Subscription</h1>
+            <p>Nodes: {count}</p>
+            <p>
+              Updated:
+              {datetime.now(timezone.utc).isoformat()}
+            </p>
+            <p>
+              Subscription:
+              <a href="sub.txt">sub.txt</a>
+            </p>
+          </body>
+          </html>
+          """
+
+          Path("public/index.html").write_text(
+              html,
+              encoding="utf-8"
+          )
+          PY
+
+      - name: Save generated subscription
+        run: |
+          cp public/sub.txt ./sub.txt
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add public/sub.txt public/index.html sub.txt
+
+          if git diff --cached --quiet; then
+            echo "节点没有变化。"
+          else
+            git commit -m "Update Shadowrocket subscription"
+            git push
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
