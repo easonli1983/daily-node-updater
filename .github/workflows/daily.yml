@@ -16,231 +16,136 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch and build subscription
+      - name: Fetch nodes and build subscription
         run: |
-          python - <<'PY'
-          import base64
-          import os
-          import re
-          import time
-          import urllib.request
-          import urllib.error
+          set +e
 
-          OUTPUT_FILE = "sub.txt"
-          REPORT_FILE = "daily-report.md"
+          rm -f all-nodes.txt sub.txt daily-report.md
 
-          SOURCES = [
-              "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt",
-              "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
-              "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt",
-              "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/clash.yml",
-              "https://cdn.jsdelivr.net/gh/vxiaov/free_proxies@main/clash/clash.provider.yaml",
-              "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub",
-              "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.yml",
-              "https://raw.githubusercontent.com/ts-sf/fly/main/clash"
-          ]
+          SOURCES=(
+            "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt"
+            "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt"
+            "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt"
+            "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/clash.yml"
+            "https://cdn.jsdelivr.net/gh/vxiaov/free_proxies@main/clash/clash.provider.yaml"
+            "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub"
+            "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.yml"
+            "https://raw.githubusercontent.com/ts-sf/fly/main/clash"
+          )
 
-          print("================================")
-          print("开始获取节点")
-          print("================================")
+          total=0
+          success=0
+          failed=0
+          index=0
 
-          all_nodes = []
-          success_sources = 0
-          failed_sources = 0
+          echo "================================"
+          echo "开始获取节点"
+          echo "================================"
 
-          def fetch(url):
-              headers = {
-                  "User-Agent": "Mozilla/5.0",
-                  "Accept": "*/*"
-              }
+          for url in "${SOURCES[@]}"; do
+            index=$((index + 1))
 
-              for attempt in range(1, 4):
-                  try:
-                      req = urllib.request.Request(
-                          url,
-                          headers=headers
-                      )
+            echo
+            echo "[$index/${#SOURCES[@]}]"
+            echo "正在获取：$url"
 
-                      with urllib.request.urlopen(
-                          req,
-                          timeout=20
-                      ) as response:
-                          return response.read().decode(
-                              "utf-8",
-                              errors="ignore"
-                          )
+            tmp="source-$index.txt"
 
-                  except urllib.error.HTTPError as e:
-                      print(
-                          f"⚠️ HTTP {e.code}，第 {attempt}/3 次"
-                      )
+            if curl -L \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --retry 2 \
+              --retry-delay 2 \
+              -A "Mozilla/5.0" \
+              -sS \
+              -o "$tmp" \
+              -w "HTTP_STATUS:%{http_code}\n" \
+              "$url" > "status-$index.txt" 2>&1; then
 
-                      if e.code in (403, 404):
-                          return None
+              status=$(grep "HTTP_STATUS:" "status-$index.txt" | tail -1 | cut -d: -f2)
 
-                      if attempt < 3:
-                          time.sleep(attempt * 2)
+              if [ "$status" = "200" ]; then
+                echo "✅ HTTP 200"
 
-                  except Exception as e:
-                      print(
-                          f"⚠️ 请求失败：{e}，第 {attempt}/3 次"
-                      )
+                count=$(grep -Eo \
+                  '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
+                  "$tmp" | wc -l)
 
-                      if attempt < 3:
-                          time.sleep(attempt * 2)
+                if [ "$count" -gt 0 ]; then
+                  echo "✅ 识别到 $count 个节点"
 
-              return None
+                  grep -Eo \
+                    '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
+                    "$tmp" >> all-nodes.txt
 
-          def extract_nodes(text):
-              if not text:
-                  return []
+                  total=$((total + count))
+                  success=$((success + 1))
+                else
+                  echo "⚠️ 可以访问，但没有识别到明文节点"
+                fi
 
-              nodes = []
+              else
+                echo "⚠️ HTTP $status，跳过"
+                failed=$((failed + 1))
+              fi
 
-              patterns = [
-                  r"vmess://[^\s<>'\"]+",
-                  r"vless://[^\s<>'\"]+",
-                  r"trojan://[^\s<>'\"]+",
-                  r"ss://[^\s<>'\"]+",
-                  r"hysteria2://[^\s<>'\"]+",
-                  r"hysteria://[^\s<>'\"]+"
-              ]
+            else
+              echo "⚠️ 请求失败，跳过"
+              failed=$((failed + 1))
+            fi
 
-              for pattern in patterns:
-                  nodes.extend(re.findall(pattern, text))
+            rm -f "$tmp" "status-$index.txt"
+          done
 
-              # 如果原文不是明文，尝试 Base64
-              compact = re.sub(r"\s+", "", text)
+          echo
+          echo "================================"
+          echo "源统计"
+          echo "================================"
+          echo "总来源：${#SOURCES[@]}"
+          echo "成功来源：$success"
+          echo "失败来源：$failed"
+          echo "抓取节点：$total"
 
-              try:
-                  decoded = base64.b64decode(
-                      compact + "=" * (-len(compact) % 4),
-                      validate=False
-                  ).decode(
-                      "utf-8",
-                      errors="ignore"
-                  )
-
-                  if any(
-                      x in decoded
-                      for x in [
-                          "vmess://",
-                          "vless://",
-                          "trojan://",
-                          "ss://",
-                          "hysteria://",
-                          "hysteria2://"
-                      ]
-                  ):
-                      for pattern in patterns:
-                          nodes.extend(
-                              re.findall(pattern, decoded)
-                          )
-
-              except Exception:
-                  pass
-
-              return nodes
-
-          for source in SOURCES:
-              print()
-              print("正在获取：")
-              print(source)
-
-              content = fetch(source)
-
-              if content is None:
-                  print("❌ 本来源无法访问，跳过")
-                  failed_sources += 1
-                  continue
-
-              nodes = extract_nodes(content)
-
-              if nodes:
-                  print(
-                      "✅ 获取成功：",
-                      len(nodes),
-                      "个节点"
-                  )
-                  all_nodes.extend(nodes)
-                  success_sources += 1
-              else:
-                  print(
-                      "⚠️ 获取成功，但没有识别到节点"
-                  )
-
-          print()
-          print("================================")
-          print("源统计")
-          print("================================")
-          print("总来源：", len(SOURCES))
-          print("成功来源：", success_sources)
-          print("失败来源：", failed_sources)
-          print("抓取节点：", len(all_nodes))
+          if [ ! -s all-nodes.txt ]; then
+            echo "❌ 一个节点都没有获取到"
+            exit 1
+          fi
 
           # 去重
-          unique_nodes = []
-          seen = set()
+          sort -u all-nodes.txt > unique-nodes.txt
 
-          for node in all_nodes:
-              node = node.strip()
+          unique=$(wc -l < unique-nodes.txt)
 
-              if not node:
-                  continue
+          echo "去重后节点：$unique"
 
-              if node not in seen:
-                  seen.add(node)
-                  unique_nodes.append(node)
+          # 暂时最多保留 100 个
+          head -n 100 unique-nodes.txt > sub.txt
 
-          print("去重后节点：", len(unique_nodes))
+          final=$(wc -l < sub.txt)
 
-          # 最多保留 100 个
-          final_nodes = unique_nodes[:100]
+          echo "最终节点数量：$final"
 
-          print("最终节点数量：", len(final_nodes))
+          echo
+          echo "================================"
+          echo "生成完成"
+          echo "================================"
 
-          with open(
-              OUTPUT_FILE,
-              "w",
-              encoding="utf-8"
-          ) as f:
-              for node in final_nodes:
-                  f.write(node + "\n")
+          cat > daily-report.md <<EOF
+          # Daily Node Update
 
-          report = f"""# Daily Node Update
+          - 总来源：${#SOURCES[@]}
+          - 成功来源：$success
+          - 失败来源：$failed
+          - 抓取节点：$total
+          - 去重后节点：$unique
+          - 最终节点：$final
 
-          ## 节点更新结果
-
-          - 来源数量：{len(SOURCES)}
-          - 成功来源：{success_sources}
-          - 失败来源：{failed_sources}
-          - 抓取节点：{len(all_nodes)}
-          - 去重后节点：{len(unique_nodes)}
-          - 最终节点：{len(final_nodes)}
-
-          ## 订阅地址
+          ## Shadowrocket 订阅地址
 
           https://twit2er.github.io/daily-node-updater/sub.txt
-          """
+          EOF
 
-          with open(
-              REPORT_FILE,
-              "w",
-              encoding="utf-8"
-          ) as f:
-              f.write(report)
-
-          print()
-          print("================================")
-          print("生成完成")
-          print("================================")
-          print(
-              "订阅地址："
-          )
-          print(
-              "https://twit2er.github.io/daily-node-updater/sub.txt"
-          )
-          PY
+          echo "订阅文件已生成：sub.txt"
 
       - name: Send email
         run: |
@@ -249,57 +154,43 @@ jobs:
           import os
           import urllib.request
 
-          with open(
-              "daily-report.md",
-              "r",
-              encoding="utf-8"
-          ) as f:
+          with open("daily-report.md", "r", encoding="utf-8") as f:
               report = f.read()
 
-          html_report = report.replace(
-              "\n",
-              "<br>"
-          )
-
-          with open(
-              "sub.txt",
-              "r",
-              encoding="utf-8"
-          ) as f:
-              node_count = len(
-                  [
-                      x for x in f.read().splitlines()
-                      if x.strip()
-                  ]
-              )
+          with open("sub.txt", "r", encoding="utf-8") as f:
+              nodes = [
+                  x.strip()
+                  for x in f
+                  if x.strip()
+              ]
 
           html = f"""
           <h2>Daily Node Update</h2>
 
-          <p>{html_report}</p>
+          <p>节点检查已经完成。</p>
+
+          <ul>
+            <li>最终节点数量：{len(nodes)}</li>
+          </ul>
 
           <hr>
 
-          <p>
-          最终节点数量：{node_count}
-          </p>
-
-          <p>
-          Shadowrocket 订阅地址：
-          </p>
+          <p>Shadowrocket 订阅地址：</p>
 
           <p>
           <a href="https://twit2er.github.io/daily-node-updater/sub.txt">
           https://twit2er.github.io/daily-node-updater/sub.txt
           </a>
           </p>
+
+          <hr>
+
+          <pre>{report}</pre>
           """
 
           data = {
               "from": "Daily Update <onboarding@resend.dev>",
-              "to": [
-                  os.environ["EMAIL"]
-              ],
+              "to": [os.environ["EMAIL"]],
               "subject": "Daily Update｜节点订阅更新",
               "html": html
           }
@@ -309,8 +200,7 @@ jobs:
               data=json.dumps(data).encode("utf-8"),
               headers={
                   "Authorization":
-                      "Bearer " +
-                      os.environ["RESEND_API_KEY"],
+                      "Bearer " + os.environ["RESEND_API_KEY"],
                   "Content-Type":
                       "application/json",
                   "User-Agent":
@@ -319,14 +209,9 @@ jobs:
               method="POST"
           )
 
-          with urllib.request.urlopen(
-              req,
-              timeout=30
-          ) as response:
+          with urllib.request.urlopen(req, timeout=30) as response:
               print("📧 邮件发送成功")
-              print(
-                  response.read().decode("utf-8")
-              )
+              print(response.read().decode("utf-8"))
           PY
 
         env:
