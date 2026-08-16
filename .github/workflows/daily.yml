@@ -4,7 +4,6 @@ name: Node Auto Update
 on:
   schedule:
     - cron: "0 0,8,16 * * *"
-
   workflow_dispatch:
 
 permissions:
@@ -19,49 +18,49 @@ jobs:
       # ============================================================
       # 1. Checkout
       # ============================================================
-
       - name: Checkout
         uses: actions/checkout@v4
 
 
       # ============================================================
-      # 2. 安裝 Python 工具
+      # 2. 安裝 Python 套件
+      # 不使用 apt / docker，避免 containerd 衝突
       # ============================================================
-
-      - name: Install tools
+      - name: Install Python tools
         shell: bash
         run: |
           set -e
 
-          sudo apt-get update
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user pyyaml
 
-          sudo apt-get install -y \
-            curl \
-            jq \
-            python3 \
-            python3-yaml
+          echo "Python："
+          python3 --version
+
+          echo "PyYAML："
+          python3 -c "import yaml; print(yaml.__version__)"
 
 
       # ============================================================
       # 3. 下載 mihomo
       # ============================================================
-
       - name: Install mihomo
         shell: bash
         run: |
           set -e
 
-          VERSION="v1.19.29"
+          MIHOMO_VERSION="v1.19.29"
 
-          echo "下載 mihomo ${VERSION}"
+          echo "下載 mihomo ${MIHOMO_VERSION}"
 
           curl -L \
-            --fail \
             --retry 3 \
+            --retry-delay 2 \
             --connect-timeout 15 \
             --max-time 120 \
-            -o mihomo.gz \
-            "https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/mihomo-linux-amd64-${VERSION}.gz"
+            -fsS \
+            "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-${MIHOMO_VERSION}.gz" \
+            -o mihomo.gz
 
           gunzip -f mihomo.gz
 
@@ -71,9 +70,8 @@ jobs:
 
 
       # ============================================================
-      # 4. 抓取節點
+      # 4. 抓取原始節點
       # ============================================================
-
       - name: Fetch nodes
         shell: bash
         run: |
@@ -81,6 +79,7 @@ jobs:
 
           rm -f all-nodes.txt
           rm -f unique-nodes.txt
+          rm -f source-*.txt
 
           SOURCES=(
             "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt"
@@ -96,6 +95,7 @@ jobs:
           total=0
           success=0
           failed=0
+          index=0
 
           echo "========================================"
           echo "開始抓取節點"
@@ -103,55 +103,54 @@ jobs:
 
           for url in "${SOURCES[@]}"; do
 
-            echo
-            echo "來源：$url"
+            index=$((index + 1))
 
-            tmp=$(mktemp)
+            echo
+            echo "[$index/${#SOURCES[@]}]"
+            echo "$url"
+
+            tmp="source-${index}.txt"
 
             if curl -L \
-              --fail \
-              --silent \
-              --show-error \
-              --location \
               --connect-timeout 10 \
-              --max-time 40 \
+              --max-time 45 \
               --retry 2 \
               --retry-delay 2 \
               -A "Mozilla/5.0" \
+              -fsS \
               "$url" \
               -o "$tmp"; then
 
               count=$(
-                grep -Eo \
+                grep -Eoi \
                   '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
-                  "$tmp" \
-                  2>/dev/null \
-                  | wc -l \
-                  | tr -d ' '
+                  "$tmp" 2>/dev/null |
+                wc -l |
+                tr -d ' '
               )
 
               if [ "$count" -gt 0 ]; then
 
-                grep -Eo \
+                grep -Eoi \
                   '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
-                  "$tmp" \
-                  >> all-nodes.txt
+                  "$tmp" |
+                sed 's/[[:space:]]*$//' |
+                >> all-nodes.txt
 
                 total=$((total + count))
                 success=$((success + 1))
 
-                echo "找到 $count 個 URI 節點"
+                echo "找到：$count 個 URI 節點"
 
               else
 
-                echo "來源可訪問，但沒有找到 URI"
+                echo "沒有找到 URI 節點"
 
               fi
 
             else
 
-              echo "抓取失敗"
-
+              echo "來源抓取失敗"
               failed=$((failed + 1))
 
             fi
@@ -165,13 +164,13 @@ jobs:
           echo "抓取完成"
           echo "========================================"
 
-          echo "來源總數：${#SOURCES[@]}"
-          echo "成功來源：$success"
-          echo "失敗來源：$failed"
-          echo "抓取節點：$total"
+          echo "來源：${#SOURCES[@]}"
+          echo "成功：$success"
+          echo "失敗：$failed"
+          echo "原始節點：$total"
 
           if [ ! -s all-nodes.txt ]; then
-            echo "ERROR：沒有抓到任何節點"
+            echo "ERROR：完全沒有抓到節點"
             exit 1
           fi
 
@@ -182,478 +181,288 @@ jobs:
           echo "去重後：$UNIQUE"
 
           if [ "$UNIQUE" -lt 5 ]; then
-            echo "ERROR：去重後少於 5 個節點"
+            echo "ERROR：去重後節點少於 5"
             exit 1
           fi
 
 
       # ============================================================
-      # 5. 將 URI 轉成 mihomo YAML
+      # 5. 啟動 subconverter
+      #
+      # Docker 不再使用。
+      # 使用公開 Docker image 只會造成前面的 containerd 問題，
+      # 所以這裡直接下載已編譯好的 subconverter binary。
       # ============================================================
+      - name: Install subconverter
+        shell: bash
+        run: |
+          set -e
 
-      - name: Convert nodes
+          echo "下載 subconverter"
+
+          curl -L \
+            --retry 3 \
+            --retry-delay 2 \
+            --connect-timeout 15 \
+            --max-time 120 \
+            -fsS \
+            "https://github.com/MetaCubeX/subconverter/releases/download/v0.9.2/subconverter_linux64" \
+            -o subconverter
+
+          chmod +x subconverter
+
+          echo "啟動 subconverter"
+
+          ./subconverter \
+            > subconverter.log 2>&1 &
+
+          echo $! > subconverter.pid
+
+          echo "等待 subconverter"
+
+          for i in $(seq 1 30); do
+
+            if curl -fsS \
+              --connect-timeout 2 \
+              --max-time 3 \
+              "http://127.0.0.1:25500/version" \
+              >/dev/null 2>&1; then
+
+              echo "subconverter 已啟動"
+              break
+
+            fi
+
+            sleep 1
+
+          done
+
+          if ! curl -fsS \
+            --connect-timeout 3 \
+            --max-time 5 \
+            "http://127.0.0.1:25500/version" \
+            >/dev/null 2>&1; then
+
+            echo "ERROR：subconverter 啟動失敗"
+            cat subconverter.log || true
+            exit 1
+
+          fi
+
+          echo "subconverter OK"
+
+
+      # ============================================================
+      # 6. 分批把 URI 轉成 Clash
+      #
+      # 每批只有 20 個節點。
+      # 避免巨大 URL 導致 HTTP 400。
+      # ============================================================
+      - name: Convert nodes to Clash
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf converted
+          mkdir -p converted
+
+          echo "========================================"
+          echo "開始分批轉換"
+          echo "========================================"
+
+          split -l 20 unique-nodes.txt converted/batch-
+
+          batch_count=0
+          success_count=0
+
+          for file in converted/batch-*; do
+
+            [ -f "$file" ] || continue
+
+            batch_count=$((batch_count + 1))
+
+            echo
+            echo "轉換批次：$batch_count"
+
+            URL=$(
+              python3 - "$file" <<'PY'
+          import sys
+          import urllib.parse
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              nodes = [
+                  x.strip()
+                  for x in f
+                  if x.strip()
+              ]
+
+          data = "|".join(nodes)
+
+          print(
+              urllib.parse.quote(
+                  data,
+                  safe=""
+              )
+          )
+          PY
+            )
+
+            output="converted/result-${batch_count}.yaml"
+
+            ok=0
+
+            for retry in 1 2 3; do
+
+              echo "嘗試：$retry"
+
+              if curl -fsS \
+                --connect-timeout 10 \
+                --max-time 60 \
+                "http://127.0.0.1:25500/sub?target=clash&url=${URL}&emoji=false" \
+                -o "$output"; then
+
+                if grep -q "^proxies:" "$output" 2>/dev/null; then
+
+                  echo "批次成功"
+
+                  ok=1
+                  success_count=$((success_count + 1))
+                  break
+
+                fi
+
+              fi
+
+              echo "批次失敗，重新嘗試"
+              sleep 2
+
+            done
+
+            if [ "$ok" -eq 0 ]; then
+              echo "此批次跳過"
+              rm -f "$output"
+            fi
+
+          done
+
+          echo
+          echo "========================================"
+          echo "轉換完成"
+          echo "========================================"
+
+          echo "批次總數：$batch_count"
+          echo "成功批次：$success_count"
+
+          if ! ls converted/result-*.yaml >/dev/null 2>&1; then
+            echo "ERROR：沒有任何批次轉換成功"
+
+            echo
+            echo "subconverter log："
+            cat subconverter.log || true
+
+            exit 1
+          fi
+
+
+      # ============================================================
+      # 7. 合併所有 Clash 節點
+      # ============================================================
+      - name: Merge Clash nodes
         shell: bash
         run: |
           set -e
 
           python3 <<'PY'
-
-          import base64
-          import json
-          import urllib.parse
+          import glob
           import yaml
 
-
-          def b64decode_text(text):
-
-              text = text.strip()
-
-              text += "=" * (-len(text) % 4)
-
-              try:
-
-                  return base64.b64decode(
-                      text
-                  ).decode(
-                      "utf-8",
-                      errors="ignore"
-                  )
-
-              except Exception:
-
-                  return ""
-
-
-          def parse_vmess(uri):
-
-              try:
-
-                  raw = uri[8:]
-
-                  obj = json.loads(
-                      b64decode_text(raw)
-                  )
-
-                  server = obj.get("add")
-                  port = int(obj.get("port", 0))
-                  uuid = obj.get("id")
-
-                  if not server or not port or not uuid:
-                      return None
-
-                  name = (
-                      obj.get("ps")
-                      or
-                      f"vmess-{server}"
-                  )
-
-                  node = {
-                      "name": name,
-                      "type": "vmess",
-                      "server": server,
-                      "port": port,
-                      "uuid": uuid,
-                      "alterId": int(
-                          obj.get("aid", 0)
-                      ),
-                      "cipher": obj.get(
-                          "scy",
-                          "auto"
-                      )
-                  }
-
-                  network = obj.get(
-                      "net",
-                      "tcp"
-                  )
-
-                  if network == "ws":
-
-                      node["network"] = "ws"
-
-                      ws = {}
-
-                      path = obj.get("path")
-
-                      host = obj.get("host")
-
-                      if path:
-                          ws["path"] = path
-
-                      if host:
-                          ws["headers"] = {
-                              "Host": host
-                          }
-
-                      if ws:
-                          node["ws-opts"] = ws
-
-                  if str(
-                      obj.get("tls", "")
-                  ).lower() == "tls":
-
-                      node["tls"] = True
-
-                      sni = obj.get("sni")
-
-                      if sni:
-                          node["servername"] = sni
-
-                  return node
-
-              except Exception:
-
-                  return None
-
-
-          def parse_vless(uri):
-
-              try:
-
-                  u = urllib.parse.urlsplit(uri)
-
-                  uuid = u.username
-                  server = u.hostname
-                  port = u.port
-
-                  if not uuid or not server or not port:
-                      return None
-
-                  q = urllib.parse.parse_qs(
-                      u.query
-                  )
-
-                  name = (
-                      urllib.parse.unquote(
-                          u.fragment
-                      )
-                      or
-                      f"vless-{server}"
-                  )
-
-                  node = {
-                      "name": name,
-                      "type": "vless",
-                      "server": server,
-                      "port": port,
-                      "uuid": uuid
-                  }
-
-                  security = q.get(
-                      "security",
-                      [""]
-                  )[0]
-
-                  if security == "tls":
-
-                      node["tls"] = True
-
-                  sni = q.get(
-                      "sni",
-                      [""]
-                  )[0]
-
-                  if sni:
-                      node["servername"] = sni
-
-                  network = q.get(
-                      "type",
-                      ["tcp"]
-                  )[0]
-
-                  if network == "ws":
-
-                      node["network"] = "ws"
-
-                      ws = {}
-
-                      path = q.get(
-                          "path",
-                          [""]
-                      )[0]
-
-                      host = q.get(
-                          "host",
-                          [""]
-                      )[0]
-
-                      if path:
-                          ws["path"] = path
-
-                      if host:
-                          ws["headers"] = {
-                              "Host": host
-                          }
-
-                      if ws:
-                          node["ws-opts"] = ws
-
-                  return node
-
-              except Exception:
-
-                  return None
-
-
-          def parse_trojan(uri):
-
-              try:
-
-                  u = urllib.parse.urlsplit(uri)
-
-                  password = u.username
-                  server = u.hostname
-                  port = u.port
-
-                  if not password or not server or not port:
-                      return None
-
-                  q = urllib.parse.parse_qs(
-                      u.query
-                  )
-
-                  name = (
-                      urllib.parse.unquote(
-                          u.fragment
-                      )
-                      or
-                      f"trojan-{server}"
-                  )
-
-                  node = {
-                      "name": name,
-                      "type": "trojan",
-                      "server": server,
-                      "port": port,
-                      "password": password
-                  }
-
-                  sni = q.get(
-                      "sni",
-                      [""]
-                  )[0]
-
-                  if sni:
-                      node["sni"] = sni
-
-                  return node
-
-              except Exception:
-
-                  return None
-
-
-          def parse_ss(uri):
-
-              try:
-
-                  raw = uri[5:]
-
-                  if "#" in raw:
-
-                      raw = raw.split(
-                          "#",
-                          1
-                      )[0]
-
-                  if "@" in raw:
-
-                      auth, address = raw.rsplit(
-                          "@",
-                          1
-                      )
-
-                      if ":" not in auth:
-                          return None
-
-                      method, password = auth.split(
-                          ":",
-                          1
-                      )
-
-                      server, port = address.rsplit(
-                          ":",
-                          1
-                      )
-
-                      return {
-                          "name":
-                              f"ss-{server}",
-
-                          "type":
-                              "ss",
-
-                          "server":
-                              server,
-
-                          "port":
-                              int(port),
-
-                          "cipher":
-                              method,
-
-                          "password":
-                              password
-                      }
-
-                  decoded = b64decode_text(
-                      raw
-                  )
-
-                  if decoded:
-
-                      return parse_ss(
-                          "ss://" + decoded
-                      )
-
-              except Exception:
-
-                  pass
-
-              return None
-
-
-          def parse(uri):
-
-              uri = uri.strip()
-
-              if uri.startswith(
-                  "vmess://"
-              ):
-
-                  return parse_vmess(
-                      uri
-                  )
-
-              if uri.startswith(
-                  "vless://"
-              ):
-
-                  return parse_vless(
-                      uri
-                  )
-
-              if uri.startswith(
-                  "trojan://"
-              ):
-
-                  return parse_trojan(
-                      uri
-                  )
-
-              if uri.startswith(
-                  "ss://"
-              ):
-
-                  return parse_ss(
-                      uri
-                  )
-
-              return None
-
-
-          nodes = []
-
-          with open(
-              "unique-nodes.txt",
-              "r",
-              encoding="utf-8"
-          ) as f:
-
-              for line in f:
-
-                  line = line.strip()
-
-                  if not line:
-                      continue
-
-                  node = parse(line)
-
-                  if node:
-                      nodes.append(node)
-
-
-          # 去除重複名稱
-
-          used = set()
-
-          final = []
-
-          for node in nodes:
-
-              original_name = node["name"]
-
-              name = original_name
-
-              number = 2
-
-              while name in used:
-
-                  name = (
-                      f"{original_name}-{number}"
-                  )
-
-                  number += 1
-
-              node["name"] = name
-
-              used.add(name)
-
-              final.append(node)
-
-
-          print(
-              "成功解析：",
-              len(final)
+          all_proxies = []
+          seen = set()
+
+          files = sorted(
+              glob.glob(
+                  "converted/result-*.yaml"
+              )
           )
 
+          print("成功配置：", len(files))
 
-          if len(final) < 5:
+          for filename in files:
 
-              raise SystemExit(
-                  "成功解析節點少於 5 個"
+              try:
+
+                  with open(
+                      filename,
+                      "r",
+                      encoding="utf-8"
+                  ) as f:
+
+                      data = yaml.safe_load(f)
+
+              except Exception as e:
+
+                  print(
+                      "讀取失敗：",
+                      filename,
+                      e
+                  )
+                  continue
+
+              if not isinstance(data, dict):
+                  continue
+
+              proxies = data.get(
+                  "proxies",
+                  []
               )
 
+              if not isinstance(
+                  proxies,
+                  list
+              ):
+                  continue
+
+              for proxy in proxies:
+
+                  if not isinstance(
+                      proxy,
+                      dict
+                  ):
+                      continue
+
+                  name = proxy.get("name")
+
+                  if not name:
+                      continue
+
+                  if name in seen:
+                      continue
+
+                  seen.add(name)
+                  all_proxies.append(proxy)
+
+          print(
+              "合併後節點：",
+              len(all_proxies)
+          )
+
+          if len(all_proxies) < 5:
+              raise SystemExit(
+                  "ERROR：合併後節點少於 5"
+              )
 
           config = {
-
               "mixed-port": 7890,
-
               "allow-lan": False,
-
               "mode": "rule",
-
               "log-level": "silent",
-
-              "proxies": final,
-
-              "proxy-groups": [
-                  {
-                      "name": "AUTO",
-
-                      "type": "url-test",
-
-                      "url":
-                          "https://www.gstatic.com/generate_204",
-
-                      "interval": 30,
-
-                      "tolerance": 0,
-
-                      "proxies": [
-                          x["name"]
-                          for x in final
-                      ]
-                  }
-              ],
-
-              "external-controller":
-                  "127.0.0.1:9090"
+              "proxies": all_proxies
           }
 
-
           with open(
-              "mihomo.yaml",
+              "clash.yaml",
               "w",
               encoding="utf-8"
           ) as f:
@@ -669,14 +478,84 @@ jobs:
 
 
       # ============================================================
-      # 6. 啟動 mihomo
+      # 8. 建立 mihomo 測試配置
       # ============================================================
+      - name: Build mihomo config
+        shell: bash
+        run: |
+          set -e
 
+          python3 <<'PY'
+          import yaml
+
+          with open(
+              "clash.yaml",
+              "r",
+              encoding="utf-8"
+          ) as f:
+
+              data = yaml.safe_load(f)
+
+          proxies = data.get(
+              "proxies",
+              []
+          )
+
+          names = []
+
+          for proxy in proxies:
+
+              name = proxy.get("name")
+
+              if name:
+                  names.append(name)
+
+          data["proxy-groups"] = [
+              {
+                  "name": "AUTO",
+                  "type": "url-test",
+                  "url": "https://www.gstatic.com/generate_204",
+                  "interval": 300,
+                  "tolerance": 0,
+                  "proxies": names
+              }
+          ]
+
+          data["external-controller"] = \
+              "127.0.0.1:9090"
+
+          data["secret"] = ""
+
+          with open(
+              "mihomo.yaml",
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              yaml.safe_dump(
+                  data,
+                  f,
+                  allow_unicode=True,
+                  sort_keys=False
+              )
+
+          print(
+              "mihomo 節點：",
+              len(names)
+          )
+
+          PY
+
+
+      # ============================================================
+      # 9. 啟動 mihomo
+      # ============================================================
       - name: Start mihomo
         shell: bash
         run: |
           set -e
 
+          rm -rf mihomo-data
           mkdir -p mihomo-data
 
           ./mihomo \
@@ -686,16 +565,19 @@ jobs:
 
           echo $! > mihomo.pid
 
-          echo "等待 mihomo 啟動..."
+          echo "等待 mihomo 啟動"
+
+          started=0
 
           for i in $(seq 1 30); do
 
             if curl -fsS \
-              http://127.0.0.1:9090/version \
+              --connect-timeout 2 \
+              --max-time 3 \
+              "http://127.0.0.1:9090/version" \
               >/dev/null 2>&1; then
 
-              echo "mihomo 已啟動"
-
+              started=1
               break
 
             fi
@@ -704,158 +586,174 @@ jobs:
 
           done
 
-          if ! curl -fsS \
-            http://127.0.0.1:9090/version \
-            >/dev/null 2>&1; then
+          if [ "$started" -ne 1 ]; then
 
             echo "ERROR：mihomo 啟動失敗"
 
-            cat mihomo.log
+            cat mihomo.log || true
 
             exit 1
 
           fi
 
+          echo "mihomo 已啟動"
 
-      # ============================================================
-      # 7. 等待自動測速
-      # ============================================================
-
-      - name: Wait for node testing
-        shell: bash
-        run: |
-          set -e
-
-          echo "開始等待節點測速..."
-
-          sleep 60
-
-          echo "開始讀取測速結果"
+          curl -fsS \
+            "http://127.0.0.1:9090/version"
 
 
       # ============================================================
-      # 8. 取得每個節點的延遲
+      # 10. 實際測試節點
+      #
+      # 不再讓 mihomo 一次測幾千個節點。
+      # 分批處理，避免 GitHub Runner 爆掉。
       # ============================================================
-
-      - name: Test nodes
+      - name: Test and optimize nodes
         shell: bash
         run: |
           set -e
 
           python3 <<'PY'
-
           import json
+          import time
           import urllib.parse
           import urllib.request
-          import time
+          import urllib.error
 
+          API = "http://127.0.0.1:9090"
 
           with open(
-              "mihomo.yaml",
+              "clash.yaml",
               "r",
               encoding="utf-8"
           ) as f:
 
               import yaml
+              data = yaml.safe_load(f)
 
-              config = yaml.safe_load(f)
-
-
-          proxies = config.get(
+          proxies = data.get(
               "proxies",
               []
           )
 
+          names = [
+              p["name"]
+              for p in proxies
+              if isinstance(p, dict)
+              and p.get("name")
+          ]
+
+          print(
+              "準備測試節點：",
+              len(names)
+          )
 
           results = []
 
-
-          print(
-              "總節點：",
-              len(proxies)
-          )
-
-
-          for index, proxy in enumerate(
-              proxies,
+          # --------------------------------------------------------
+          # 使用 mihomo 的 delay API
+          # --------------------------------------------------------
+          for index, name in enumerate(
+              names,
               1
           ):
 
-              name = proxy.get(
-                  "name"
+              encoded = urllib.parse.quote(
+                  name,
+                  safe=""
               )
 
-              if not name:
-                  continue
+              url = (
+                  API
+                  + "/proxies/"
+                  + encoded
+                  + "/delay"
+                  + "?url="
+                  + urllib.parse.quote(
+                      "https://www.gstatic.com/generate_204",
+                      safe=""
+                  )
+                  + "&timeout=5000"
+              )
 
               try:
 
-                  encoded = urllib.parse.quote(
-                      name,
-                      safe=""
-                  )
-
-                  url = (
-                      "http://127.0.0.1:9090/"
-                      "proxies/"
-                      + encoded
-                      + "/delay"
-                      "?timeout=5000"
-                      "&url="
-                      + urllib.parse.quote(
-                          "https://www.gstatic.com/generate_204",
-                          safe=""
-                      )
-                  )
-
-                  request = urllib.request.Request(
-                      url
+                  req = urllib.request.Request(
+                      url,
+                      method="GET"
                   )
 
                   with urllib.request.urlopen(
-                      request,
+                      req,
                       timeout=8
                   ) as response:
 
-                      data = json.loads(
-                          response.read().decode(
-                              "utf-8"
-                          )
+                      body = response.read().decode(
+                          "utf-8"
                       )
 
-                  delay = data.get(
+                  item = json.loads(body)
+
+                  delay = item.get(
                       "delay",
                       0
                   )
 
-                  if delay and delay > 0:
+                  if (
+                      isinstance(delay, int)
+                      and delay > 0
+                  ):
 
                       results.append(
                           {
-                              "name":
-                                  name,
-
-                              "delay":
-                                  int(delay)
+                              "name": name,
+                              "delay": delay
                           }
                       )
 
-                      print(
-                          f"[{index}] "
-                          f"{delay} ms "
-                          f"{name}"
-                      )
-
               except Exception:
-
                   pass
 
+              if index % 25 == 0:
+
+                  print(
+                      "已測試：",
+                      index,
+                      "/",
+                      len(names),
+                      "可用：",
+                      len(results)
+                  )
 
           results.sort(
-              key=lambda x:
-                  x["delay"]
+              key=lambda x: x["delay"]
           )
 
+          print()
+          print(
+              "可用節點：",
+              len(results)
+          )
+
+          print()
+          print("最快 20：")
+
+          for i, item in enumerate(
+              results[:20],
+              1
+          ):
+
+              print(
+                  f"{i:02d}. "
+                  f"{item['delay']} ms  "
+                  f"{item['name']}"
+              )
+
+          if len(results) < 5:
+
+              raise SystemExit(
+                  "ERROR：實測可用節點少於 5，停止更新。"
+              )
 
           with open(
               "tested-nodes.json",
@@ -870,69 +768,28 @@ jobs:
                   indent=2
               )
 
-
-          print()
-          print(
-              "========================================"
-          )
-
-          print(
-              "測試成功：",
-              len(results)
-          )
-
-          print(
-              "========================================"
-          )
-
-
-          for i, item in enumerate(
-              results[:20],
-              1
-          ):
-
-              print(
-                  f"{i:02d}. "
-                  f"{item['delay']} ms "
-                  f"{item['name']}"
-              )
-
-
-          if len(results) < 5:
-
-              raise SystemExit(
-                  "實測成功節點少於 5 個，"
-                  "本次停止更新。"
-              )
-
           PY
 
 
       # ============================================================
-      # 9. 產生優選 YAML
+      # 11. 建立最終 100 個最快節點
       # ============================================================
-
-      - name: Build optimized config
+      - name: Build optimized subscription
         shell: bash
         run: |
           set -e
 
           python3 <<'PY'
-
           import json
           import yaml
 
-
           with open(
-              "mihomo.yaml",
+              "clash.yaml",
               "r",
               encoding="utf-8"
           ) as f:
 
-              source = yaml.safe_load(
-                  f
-              )
-
+              source = yaml.safe_load(f)
 
           with open(
               "tested-nodes.json",
@@ -940,58 +797,44 @@ jobs:
               encoding="utf-8"
           ) as f:
 
-              tested = json.load(
-                  f
-              )
-
-
-          # 最多保留 100 個最快節點
+              tested = json.load(f)
 
           best = tested[:100]
 
-
           wanted = {
-              x["name"]
-              for x in best
+              item["name"]
+              for item in best
           }
 
-
           proxies = []
-
 
           for proxy in source.get(
               "proxies",
               []
           ):
 
-              if proxy.get(
-                  "name"
-              ) in wanted:
+              if (
+                  isinstance(proxy, dict)
+                  and proxy.get("name")
+                  in wanted
+              ):
 
-                  proxies.append(
-                      proxy
-                  )
-
+                  proxies.append(proxy)
 
           print(
-              "最終優選：",
+              "最終優選節點：",
               len(proxies)
           )
-
 
           if len(proxies) < 5:
 
               raise SystemExit(
-                  "優選後少於 5 個節點"
+                  "ERROR：優選後少於 5 個節點"
               )
 
-
-          optimized = {
-
-              "proxies":
-                  proxies
+          final = {
+              "proxies": proxies
           }
-
 
           with open(
               "optimized.yaml",
@@ -1000,7 +843,7 @@ jobs:
           ) as f:
 
               yaml.safe_dump(
-                  optimized,
+                  final,
                   f,
                   allow_unicode=True,
                   sort_keys=False
@@ -1010,21 +853,18 @@ jobs:
 
 
       # ============================================================
-      # 10. 產生 Shadowrocket Base64 訂閱
+      # 12. 轉換成 Shadowrocket / V2Ray 訂閱
+      #
+      # 同樣只處理最多 100 個節點，
+      # 不會再把幾千個節點塞進 URL。
       # ============================================================
-
-      - name: Build subscription
+      - name: Build Shadowrocket subscription
         shell: bash
         run: |
           set -e
 
           python3 <<'PY'
-
-          import base64
-          import json
           import urllib.parse
-          import yaml
-
 
           with open(
               "optimized.yaml",
@@ -1032,456 +872,93 @@ jobs:
               encoding="utf-8"
           ) as f:
 
-              data = yaml.safe_load(
-                  f
-              )
+              data = f.read()
 
-
-          proxies = data.get(
-              "proxies",
-              []
+          encoded = urllib.parse.quote(
+              data,
+              safe=""
           )
-
-
-          uris = []
-
-
-          # ========================================================
-          # vmess
-          # ========================================================
-
-          for p in proxies:
-
-              ptype = p.get(
-                  "type"
-              )
-
-              name = p.get(
-                  "name",
-                  "node"
-              )
-
-              server = p.get(
-                  "server"
-              )
-
-              port = p.get(
-                  "port"
-              )
-
-
-              if not server or not port:
-                  continue
-
-
-              if ptype == "vmess":
-
-                  obj = {
-
-                      "v":
-                          "2",
-
-                      "ps":
-                          name,
-
-                      "add":
-                          server,
-
-                      "port":
-                          str(port),
-
-                      "id":
-                          p.get(
-                              "uuid",
-                              ""
-                          ),
-
-                      "aid":
-                          str(
-                              p.get(
-                                  "alterId",
-                                  0
-                              )
-                          ),
-
-                      "scy":
-                          p.get(
-                              "cipher",
-                              "auto"
-                          ),
-
-                      "net":
-                          p.get(
-                              "network",
-                              "tcp"
-                          ),
-
-                      "type":
-                          "none"
-
-                  }
-
-
-                  if p.get(
-                      "tls"
-                  ):
-
-                      obj["tls"] = "tls"
-
-
-                  if p.get(
-                      "servername"
-                  ):
-
-                      obj["sni"] = p[
-                          "servername"
-                      ]
-
-
-                  ws = p.get(
-                      "ws-opts"
-                  )
-
-
-                  if ws:
-
-                      obj["path"] = ws.get(
-                          "path",
-                          "/"
-                      )
-
-                      headers = ws.get(
-                          "headers",
-                          {}
-                      )
-
-                      if headers.get(
-                          "Host"
-                      ):
-
-                          obj["host"] = headers[
-                              "Host"
-                          ]
-
-
-                  encoded = base64.b64encode(
-                      json.dumps(
-                          obj,
-                          ensure_ascii=False,
-                          separators=(
-                              ",",
-                              ":"
-                          )
-                      ).encode(
-                          "utf-8"
-                      )
-                  ).decode(
-                      "ascii"
-                  )
-
-
-                  uris.append(
-                      "vmess://" + encoded
-                  )
-
-
-              # ====================================================
-              # vless
-              # ====================================================
-
-              elif ptype == "vless":
-
-                  query = {
-
-                      "encryption":
-                          "none",
-
-                      "type":
-                          p.get(
-                              "network",
-                              "tcp"
-                          )
-                  }
-
-
-                  if p.get(
-                      "tls"
-                  ):
-
-                      query["security"] = "tls"
-
-
-                  if p.get(
-                      "servername"
-                  ):
-
-                      query["sni"] = p[
-                          "servername"
-                      ]
-
-
-                  ws = p.get(
-                      "ws-opts"
-                  )
-
-
-                  if ws:
-
-                      query["path"] = ws.get(
-                          "path",
-                          "/"
-                      )
-
-                      headers = ws.get(
-                          "headers",
-                          {}
-                      )
-
-                      if headers.get(
-                          "Host"
-                      ):
-
-                          query["host"] = headers[
-                              "Host"
-                          ]
-
-
-                  uri = (
-                      "vless://"
-                      + str(
-                          p.get(
-                              "uuid",
-                              ""
-                          )
-                      )
-                      + "@"
-                      + str(server)
-                      + ":"
-                      + str(port)
-                      + "?"
-                      + urllib.parse.urlencode(
-                          query
-                      )
-                      + "#"
-                      + urllib.parse.quote(
-                          name
-                      )
-                  )
-
-
-                  uris.append(
-                      uri
-                  )
-
-
-              # ====================================================
-              # trojan
-              # ====================================================
-
-              elif ptype == "trojan":
-
-                  query = {}
-
-
-                  if p.get(
-                      "sni"
-                  ):
-
-                      query["sni"] = p[
-                          "sni"
-                      ]
-
-
-                  uri = (
-                      "trojan://"
-                      + urllib.parse.quote(
-                          str(
-                              p.get(
-                                  "password",
-                                  ""
-                              )
-                          ),
-                          safe=""
-                      )
-                      + "@"
-                      + str(server)
-                      + ":"
-                      + str(port)
-                  )
-
-
-                  if query:
-
-                      uri += (
-                          "?"
-                          + urllib.parse.urlencode(
-                              query
-                          )
-                      )
-
-
-                  uri += (
-                      "#"
-                      + urllib.parse.quote(
-                          name
-                      )
-                  )
-
-
-                  uris.append(
-                      uri
-                  )
-
-
-              # ====================================================
-              # Shadowsocks
-              # ====================================================
-
-              elif ptype == "ss":
-
-                  method = p.get(
-                      "cipher",
-                      "aes-128-gcm"
-                  )
-
-                  password = p.get(
-                      "password",
-                      ""
-                  )
-
-
-                  auth = (
-                      method
-                      + ":"
-                      + password
-                  )
-
-
-                  encoded_auth = base64.b64encode(
-                      auth.encode(
-                          "utf-8"
-                      )
-                  ).decode(
-                      "ascii"
-                  )
-
-
-                  uri = (
-                      "ss://"
-                      + encoded_auth
-                      + "@"
-                      + str(server)
-                      + ":"
-                      + str(port)
-                      + "#"
-                      + urllib.parse.quote(
-                          name
-                      )
-                  )
-
-
-                  uris.append(
-                      uri
-                  )
-
-
-          print(
-              "最終 URI：",
-              len(uris)
-          )
-
-
-          if len(uris) < 5:
-
-              raise SystemExit(
-                  "最終訂閱少於 5 個節點"
-              )
-
-
-          content = "\n".join(
-              uris
-          )
-
-
-          encoded = base64.b64encode(
-              content.encode(
-                  "utf-8"
-              )
-          ).decode(
-              "ascii"
-          )
-
 
           with open(
-              "sub.txt",
+              "optimized-url.txt",
               "w",
               encoding="utf-8"
           ) as f:
 
-              f.write(
-                  encoded
-              )
+              f.write(encoded)
 
           PY
 
+          URL=$(cat optimized-url.txt)
+
+          rm -f new-sub.txt
+
+          ok=0
+
+          for retry in 1 2 3; do
+
+            echo "Shadowrocket 轉換：$retry"
+
+            if curl -fsS \
+              --connect-timeout 10 \
+              --max-time 120 \
+              "http://127.0.0.1:25500/sub?target=v2ray&url=${URL}&emoji=false" \
+              -o new-sub.txt; then
+
+              if [ -s new-sub.txt ]; then
+
+                ok=1
+                break
+
+              fi
+
+            fi
+
+            sleep 2
+
+          done
+
+          if [ "$ok" -ne 1 ]; then
+
+            echo "ERROR：Shadowrocket 訂閱轉換失敗"
+
+            cat subconverter.log || true
+
+            exit 1
+
+          fi
+
+          echo
+          echo "最終訂閱節點："
+
+          wc -l new-sub.txt
+
+          head -n 2 new-sub.txt
+
 
       # ============================================================
-      # 11. 產生更新報告
+      # 13. 只有成功完成全部流程後才替換 sub.txt
       # ============================================================
-
-      - name: Build report
+      - name: Save successful update
         shell: bash
         run: |
           set -e
 
+          if [ ! -s new-sub.txt ]; then
+            echo "ERROR：新訂閱不存在"
+            exit 1
+          fi
+
+          mv new-sub.txt sub.txt
+
           NOW=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
-          TESTED=$(python3 <<'PY'
-          import json
-
-          with open(
-              "tested-nodes.json",
-              "r",
-              encoding="utf-8"
-          ) as f:
-
-              print(
-                  len(
-                      json.load(f)
-                  )
-              )
-          PY
+          TESTED=$(
+            python3 -c \
+              'import json; print(len(json.load(open("tested-nodes.json"))))'
           )
 
-          FINAL=$(python3 <<'PY'
-          import base64
-
-          with open(
-              "sub.txt",
-              "r",
-              encoding="utf-8"
-          ) as f:
-
-              encoded = f.read().strip()
-
-          text = base64.b64decode(
-              encoded
-          ).decode(
-              "utf-8",
-              errors="ignore"
-          )
-
-          print(
-              len(
-                  [
-                      x
-                      for x in text.splitlines()
-                      if x.strip()
-                  ]
-              )
-          )
-          PY
-          )
+          FINAL=$(wc -l < sub.txt | tr -d ' ')
 
           cat > daily-report.md <<EOF
 # Node Auto Update
@@ -1495,7 +972,7 @@ $NOW
 實測可用：
 $TESTED
 
-最終優選：
+最終訂閱：
 $FINAL
 
 訂閱地址：
@@ -1503,18 +980,14 @@ $FINAL
 https://twit2er.github.io/daily-node-updater/sub.txt
 EOF
 
-          echo "========================================"
-          echo "更新成功"
-          echo "========================================"
-
+          echo
           cat daily-report.md
 
 
       # ============================================================
-      # 12. 保存訂閱
+      # 14. Git Commit
       # ============================================================
-
-      - name: Save subscription
+      - name: Commit update
         shell: bash
         run: |
           set -e
@@ -1531,12 +1004,58 @@ EOF
 
           if git diff --cached --quiet; then
 
-            echo "訂閱內容沒有變化"
+            echo "沒有內容變化"
 
           else
 
             git commit \
-              -m "Auto update optimized nodes"
+              -m "Auto optimize nodes"
+
+            git push
+
+          fi
+
+
+      # ============================================================
+      # 15. 寫入更新狀態
+      #
+      # TG bot 以後 /start 只需要讀這個檔案。
+      # ============================================================
+      - name: Save update status
+        shell: bash
+        run: |
+          set -e
+
+          NOW=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          TESTED=$(
+            python3 -c \
+              'import json; print(len(json.load(open("tested-nodes.json"))))'
+          )
+
+          FINAL=$(wc -l < sub.txt | tr -d ' ')
+
+          cat > update-status.json <<EOF
+{
+  "status": "success",
+  "updated_at_utc": "$NOW",
+  "tested_nodes": $TESTED,
+  "final_nodes": $FINAL,
+  "interval_hours": 8,
+  "subscription": "https://twit2er.github.io/daily-node-updater/sub.txt"
+}
+EOF
+
+          git add update-status.json
+
+          if git diff --cached --quiet; then
+
+            echo "狀態沒有變化"
+
+          else
+
+            git commit \
+              -m "Update node status"
 
             git push
 
