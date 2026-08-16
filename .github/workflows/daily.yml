@@ -102,7 +102,7 @@ jobs:
 
           data = {
               "from": "Daily Update <onboarding@resend.dev>",
-              "to": ["你的Gmail地址"],
+              "to": ["openmysee@gmail.com"],
               "subject": "Daily Update｜GitHub 更新检查",
               "html": f"""
               <h2>GitHub 每日更新</h2>
