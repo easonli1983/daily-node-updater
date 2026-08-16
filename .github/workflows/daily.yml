@@ -1,9 +1,9 @@
-```yaml
 name: Node Auto Update
 
 on:
   schedule:
     - cron: "0 0,8,16 * * *"
+
   workflow_dispatch:
 
 permissions:
@@ -23,63 +23,18 @@ jobs:
 
 
       # ============================================================
-      # 2. 安裝 Python 套件
-      # 不使用 apt / docker，避免 containerd 衝突
+      # 2. 抓取所有節點
       # ============================================================
-      - name: Install Python tools
+      - name: Collect nodes
         shell: bash
         run: |
-          set -e
-
-          python3 -m pip install --user --upgrade pip
-          python3 -m pip install --user pyyaml
-
-          echo "Python："
-          python3 --version
-
-          echo "PyYAML："
-          python3 -c "import yaml; print(yaml.__version__)"
-
-
-      # ============================================================
-      # 3. 下載 mihomo
-      # ============================================================
-      - name: Install mihomo
-        shell: bash
-        run: |
-          set -e
-
-          MIHOMO_VERSION="v1.19.29"
-
-          echo "下載 mihomo ${MIHOMO_VERSION}"
-
-          curl -L \
-            --retry 3 \
-            --retry-delay 2 \
-            --connect-timeout 15 \
-            --max-time 120 \
-            -fsS \
-            "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-${MIHOMO_VERSION}.gz" \
-            -o mihomo.gz
-
-          gunzip -f mihomo.gz
-
-          chmod +x mihomo
-
-          ./mihomo -v
-
-
-      # ============================================================
-      # 4. 抓取原始節點
-      # ============================================================
-      - name: Fetch nodes
-        shell: bash
-        run: |
-          set -e
+          set -u
 
           rm -f all-nodes.txt
           rm -f unique-nodes.txt
-          rm -f source-*.txt
+          rm -f selected-nodes.txt
+          rm -f sub.txt
+          rm -f daily-report.md
 
           SOURCES=(
             "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt"
@@ -92,28 +47,24 @@ jobs:
             "https://raw.githubusercontent.com/ts-sf/fly/main/clash"
           )
 
+          echo "========================================"
+          echo "開始收集節點"
+          echo "========================================"
+
           total=0
           success=0
           failed=0
-          index=0
-
-          echo "========================================"
-          echo "開始抓取節點"
-          echo "========================================"
 
           for url in "${SOURCES[@]}"; do
 
-            index=$((index + 1))
-
             echo
-            echo "[$index/${#SOURCES[@]}]"
-            echo "$url"
+            echo "來源：$url"
 
-            tmp="source-${index}.txt"
+            tmp=$(mktemp)
 
             if curl -L \
               --connect-timeout 10 \
-              --max-time 45 \
+              --max-time 40 \
               --retry 2 \
               --retry-delay 2 \
               -A "Mozilla/5.0" \
@@ -122,25 +73,24 @@ jobs:
               -o "$tmp"; then
 
               count=$(
-                grep -Eoi \
-                  '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
-                  "$tmp" 2>/dev/null |
+                grep -Eo \
+                '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
+                "$tmp" 2>/dev/null |
                 wc -l |
                 tr -d ' '
               )
 
               if [ "$count" -gt 0 ]; then
 
-                grep -Eoi \
+                grep -Eo \
                   '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
-                  "$tmp" |
-                sed 's/[[:space:]]*$//' |
-                >> all-nodes.txt
+                  "$tmp" \
+                  >> all-nodes.txt
 
                 total=$((total + count))
                 success=$((success + 1))
 
-                echo "找到：$count 個 URI 節點"
+                echo "找到：$count 個節點"
 
               else
 
@@ -150,7 +100,7 @@ jobs:
 
             else
 
-              echo "來源抓取失敗"
+              echo "抓取失敗"
               failed=$((failed + 1))
 
             fi
@@ -159,20 +109,30 @@ jobs:
 
           done
 
+
+          # ========================================================
+          # 3. 檢查
+          # ========================================================
+
           echo
           echo "========================================"
-          echo "抓取完成"
+          echo "收集完成"
           echo "========================================"
 
-          echo "來源：${#SOURCES[@]}"
-          echo "成功：$success"
-          echo "失敗：$failed"
+          echo "來源總數：${#SOURCES[@]}"
+          echo "成功來源：$success"
+          echo "失敗來源：$failed"
           echo "原始節點：$total"
 
           if [ ! -s all-nodes.txt ]; then
-            echo "ERROR：完全沒有抓到節點"
+            echo "ERROR：沒有收集到任何節點"
             exit 1
           fi
+
+
+          # ========================================================
+          # 4. 去重
+          # ========================================================
 
           sort -u all-nodes.txt > unique-nodes.txt
 
@@ -180,814 +140,124 @@ jobs:
 
           echo "去重後：$UNIQUE"
 
-          if [ "$UNIQUE" -lt 5 ]; then
-            echo "ERROR：去重後節點少於 5"
+
+          if [ "$UNIQUE" -lt 1 ]; then
+            echo "ERROR：去重後沒有節點"
             exit 1
           fi
 
 
-      # ============================================================
-      # 5. 啟動 subconverter
-      #
-      # Docker 不再使用。
-      # 使用公開 Docker image 只會造成前面的 containerd 問題，
-      # 所以這裡直接下載已編譯好的 subconverter binary。
-      # ============================================================
-      - name: Install subconverter
-        shell: bash
-        run: |
-          set -e
+          # ========================================================
+          # 5. 隨機抽取 100 個
+          # ========================================================
 
-          echo "下載 subconverter"
+          if [ "$UNIQUE" -le 100 ]; then
 
-          curl -L \
-            --retry 3 \
-            --retry-delay 2 \
-            --connect-timeout 15 \
-            --max-time 120 \
-            -fsS \
-            "https://github.com/MetaCubeX/subconverter/releases/download/v0.9.2/subconverter_linux64" \
-            -o subconverter
+            echo "節點不足 100 個"
+            echo "全部使用"
 
-          chmod +x subconverter
+            cp unique-nodes.txt selected-nodes.txt
 
-          echo "啟動 subconverter"
+          else
 
-          ./subconverter \
-            > subconverter.log 2>&1 &
+            echo "隨機抽取 100 個節點"
 
-          echo $! > subconverter.pid
-
-          echo "等待 subconverter"
-
-          for i in $(seq 1 30); do
-
-            if curl -fsS \
-              --connect-timeout 2 \
-              --max-time 3 \
-              "http://127.0.0.1:25500/version" \
-              >/dev/null 2>&1; then
-
-              echo "subconverter 已啟動"
-              break
-
-            fi
-
-            sleep 1
-
-          done
-
-          if ! curl -fsS \
-            --connect-timeout 3 \
-            --max-time 5 \
-            "http://127.0.0.1:25500/version" \
-            >/dev/null 2>&1; then
-
-            echo "ERROR：subconverter 啟動失敗"
-            cat subconverter.log || true
-            exit 1
+            shuf \
+              -n 100 \
+              unique-nodes.txt \
+              > selected-nodes.txt
 
           fi
 
-          echo "subconverter OK"
+
+          SELECTED=$(wc -l < selected-nodes.txt | tr -d ' ')
+
+          echo "最終節點：$SELECTED"
 
 
-      # ============================================================
-      # 6. 分批把 URI 轉成 Clash
-      #
-      # 每批只有 20 個節點。
-      # 避免巨大 URL 導致 HTTP 400。
-      # ============================================================
-      - name: Convert nodes to Clash
-        shell: bash
-        run: |
-          set -e
+          if [ "$SELECTED" -lt 1 ]; then
+            echo "ERROR：沒有選出任何節點"
+            exit 1
+          fi
 
-          rm -rf converted
-          mkdir -p converted
 
-          echo "========================================"
-          echo "開始分批轉換"
-          echo "========================================"
-
-          split -l 20 unique-nodes.txt converted/batch-
-
-          batch_count=0
-          success_count=0
-
-          for file in converted/batch-*; do
-
-            [ -f "$file" ] || continue
-
-            batch_count=$((batch_count + 1))
-
-            echo
-            echo "轉換批次：$batch_count"
-
-            URL=$(
-              python3 - "$file" <<'PY'
-          import sys
-          import urllib.parse
-
-          path = sys.argv[1]
-
-          with open(path, "r", encoding="utf-8") as f:
-              nodes = [
-                  x.strip()
-                  for x in f
-                  if x.strip()
-              ]
-
-          data = "|".join(nodes)
-
-          print(
-              urllib.parse.quote(
-                  data,
-                  safe=""
-              )
-          )
-          PY
-            )
-
-            output="converted/result-${batch_count}.yaml"
-
-            ok=0
-
-            for retry in 1 2 3; do
-
-              echo "嘗試：$retry"
-
-              if curl -fsS \
-                --connect-timeout 10 \
-                --max-time 60 \
-                "http://127.0.0.1:25500/sub?target=clash&url=${URL}&emoji=false" \
-                -o "$output"; then
-
-                if grep -q "^proxies:" "$output" 2>/dev/null; then
-
-                  echo "批次成功"
-
-                  ok=1
-                  success_count=$((success_count + 1))
-                  break
-
-                fi
-
-              fi
-
-              echo "批次失敗，重新嘗試"
-              sleep 2
-
-            done
-
-            if [ "$ok" -eq 0 ]; then
-              echo "此批次跳過"
-              rm -f "$output"
-            fi
-
-          done
+          # ========================================================
+          # 6. 生成 Base64 Shadowrocket 訂閱
+          # ========================================================
 
           echo
-          echo "========================================"
-          echo "轉換完成"
-          echo "========================================"
+          echo "開始生成訂閱"
 
-          echo "批次總數：$batch_count"
-          echo "成功批次：$success_count"
+          base64 -w 0 selected-nodes.txt > sub.txt
 
-          if ! ls converted/result-*.yaml >/dev/null 2>&1; then
-            echo "ERROR：沒有任何批次轉換成功"
+          echo >> sub.txt
 
-            echo
-            echo "subconverter log："
-            cat subconverter.log || true
 
+          if [ ! -s sub.txt ]; then
+            echo "ERROR：sub.txt 生成失敗"
             exit 1
           fi
 
 
-      # ============================================================
-      # 7. 合併所有 Clash 節點
-      # ============================================================
-      - name: Merge Clash nodes
-        shell: bash
-        run: |
-          set -e
-
-          python3 <<'PY'
-          import glob
-          import yaml
-
-          all_proxies = []
-          seen = set()
-
-          files = sorted(
-              glob.glob(
-                  "converted/result-*.yaml"
-              )
-          )
-
-          print("成功配置：", len(files))
-
-          for filename in files:
-
-              try:
-
-                  with open(
-                      filename,
-                      "r",
-                      encoding="utf-8"
-                  ) as f:
-
-                      data = yaml.safe_load(f)
-
-              except Exception as e:
-
-                  print(
-                      "讀取失敗：",
-                      filename,
-                      e
-                  )
-                  continue
-
-              if not isinstance(data, dict):
-                  continue
-
-              proxies = data.get(
-                  "proxies",
-                  []
-              )
-
-              if not isinstance(
-                  proxies,
-                  list
-              ):
-                  continue
-
-              for proxy in proxies:
-
-                  if not isinstance(
-                      proxy,
-                      dict
-                  ):
-                      continue
-
-                  name = proxy.get("name")
-
-                  if not name:
-                      continue
-
-                  if name in seen:
-                      continue
-
-                  seen.add(name)
-                  all_proxies.append(proxy)
-
-          print(
-              "合併後節點：",
-              len(all_proxies)
-          )
-
-          if len(all_proxies) < 5:
-              raise SystemExit(
-                  "ERROR：合併後節點少於 5"
-              )
-
-          config = {
-              "mixed-port": 7890,
-              "allow-lan": False,
-              "mode": "rule",
-              "log-level": "silent",
-              "proxies": all_proxies
-          }
-
-          with open(
-              "clash.yaml",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              yaml.safe_dump(
-                  config,
-                  f,
-                  allow_unicode=True,
-                  sort_keys=False
-              )
-
-          PY
-
-
-      # ============================================================
-      # 8. 建立 mihomo 測試配置
-      # ============================================================
-      - name: Build mihomo config
-        shell: bash
-        run: |
-          set -e
-
-          python3 <<'PY'
-          import yaml
-
-          with open(
-              "clash.yaml",
-              "r",
-              encoding="utf-8"
-          ) as f:
-
-              data = yaml.safe_load(f)
-
-          proxies = data.get(
-              "proxies",
-              []
-          )
-
-          names = []
-
-          for proxy in proxies:
-
-              name = proxy.get("name")
-
-              if name:
-                  names.append(name)
-
-          data["proxy-groups"] = [
-              {
-                  "name": "AUTO",
-                  "type": "url-test",
-                  "url": "https://www.gstatic.com/generate_204",
-                  "interval": 300,
-                  "tolerance": 0,
-                  "proxies": names
-              }
-          ]
-
-          data["external-controller"] = \
-              "127.0.0.1:9090"
-
-          data["secret"] = ""
-
-          with open(
-              "mihomo.yaml",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              yaml.safe_dump(
-                  data,
-                  f,
-                  allow_unicode=True,
-                  sort_keys=False
-              )
-
-          print(
-              "mihomo 節點：",
-              len(names)
-          )
-
-          PY
-
-
-      # ============================================================
-      # 9. 啟動 mihomo
-      # ============================================================
-      - name: Start mihomo
-        shell: bash
-        run: |
-          set -e
-
-          rm -rf mihomo-data
-          mkdir -p mihomo-data
-
-          ./mihomo \
-            -d ./mihomo-data \
-            -f ./mihomo.yaml \
-            > mihomo.log 2>&1 &
-
-          echo $! > mihomo.pid
-
-          echo "等待 mihomo 啟動"
-
-          started=0
-
-          for i in $(seq 1 30); do
-
-            if curl -fsS \
-              --connect-timeout 2 \
-              --max-time 3 \
-              "http://127.0.0.1:9090/version" \
-              >/dev/null 2>&1; then
-
-              started=1
-              break
-
-            fi
-
-            sleep 2
-
-          done
-
-          if [ "$started" -ne 1 ]; then
-
-            echo "ERROR：mihomo 啟動失敗"
-
-            cat mihomo.log || true
-
-            exit 1
-
-          fi
-
-          echo "mihomo 已啟動"
-
-          curl -fsS \
-            "http://127.0.0.1:9090/version"
-
-
-      # ============================================================
-      # 10. 實際測試節點
-      #
-      # 不再讓 mihomo 一次測幾千個節點。
-      # 分批處理，避免 GitHub Runner 爆掉。
-      # ============================================================
-      - name: Test and optimize nodes
-        shell: bash
-        run: |
-          set -e
-
-          python3 <<'PY'
-          import json
-          import time
-          import urllib.parse
-          import urllib.request
-          import urllib.error
-
-          API = "http://127.0.0.1:9090"
-
-          with open(
-              "clash.yaml",
-              "r",
-              encoding="utf-8"
-          ) as f:
-
-              import yaml
-              data = yaml.safe_load(f)
-
-          proxies = data.get(
-              "proxies",
-              []
-          )
-
-          names = [
-              p["name"]
-              for p in proxies
-              if isinstance(p, dict)
-              and p.get("name")
-          ]
-
-          print(
-              "準備測試節點：",
-              len(names)
-          )
-
-          results = []
-
-          # --------------------------------------------------------
-          # 使用 mihomo 的 delay API
-          # --------------------------------------------------------
-          for index, name in enumerate(
-              names,
-              1
-          ):
-
-              encoded = urllib.parse.quote(
-                  name,
-                  safe=""
-              )
-
-              url = (
-                  API
-                  + "/proxies/"
-                  + encoded
-                  + "/delay"
-                  + "?url="
-                  + urllib.parse.quote(
-                      "https://www.gstatic.com/generate_204",
-                      safe=""
-                  )
-                  + "&timeout=5000"
-              )
-
-              try:
-
-                  req = urllib.request.Request(
-                      url,
-                      method="GET"
-                  )
-
-                  with urllib.request.urlopen(
-                      req,
-                      timeout=8
-                  ) as response:
-
-                      body = response.read().decode(
-                          "utf-8"
-                      )
-
-                  item = json.loads(body)
-
-                  delay = item.get(
-                      "delay",
-                      0
-                  )
-
-                  if (
-                      isinstance(delay, int)
-                      and delay > 0
-                  ):
-
-                      results.append(
-                          {
-                              "name": name,
-                              "delay": delay
-                          }
-                      )
-
-              except Exception:
-                  pass
-
-              if index % 25 == 0:
-
-                  print(
-                      "已測試：",
-                      index,
-                      "/",
-                      len(names),
-                      "可用：",
-                      len(results)
-                  )
-
-          results.sort(
-              key=lambda x: x["delay"]
-          )
-
-          print()
-          print(
-              "可用節點：",
-              len(results)
-          )
-
-          print()
-          print("最快 20：")
-
-          for i, item in enumerate(
-              results[:20],
-              1
-          ):
-
-              print(
-                  f"{i:02d}. "
-                  f"{item['delay']} ms  "
-                  f"{item['name']}"
-              )
-
-          if len(results) < 5:
-
-              raise SystemExit(
-                  "ERROR：實測可用節點少於 5，停止更新。"
-              )
-
-          with open(
-              "tested-nodes.json",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              json.dump(
-                  results,
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
-
-          PY
-
-
-      # ============================================================
-      # 11. 建立最終 100 個最快節點
-      # ============================================================
-      - name: Build optimized subscription
-        shell: bash
-        run: |
-          set -e
-
-          python3 <<'PY'
-          import json
-          import yaml
-
-          with open(
-              "clash.yaml",
-              "r",
-              encoding="utf-8"
-          ) as f:
-
-              source = yaml.safe_load(f)
-
-          with open(
-              "tested-nodes.json",
-              "r",
-              encoding="utf-8"
-          ) as f:
-
-              tested = json.load(f)
-
-          best = tested[:100]
-
-          wanted = {
-              item["name"]
-              for item in best
-          }
-
-          proxies = []
-
-          for proxy in source.get(
-              "proxies",
-              []
-          ):
-
-              if (
-                  isinstance(proxy, dict)
-                  and proxy.get("name")
-                  in wanted
-              ):
-
-                  proxies.append(proxy)
-
-          print(
-              "最終優選節點：",
-              len(proxies)
-          )
-
-          if len(proxies) < 5:
-
-              raise SystemExit(
-                  "ERROR：優選後少於 5 個節點"
-              )
-
-          final = {
-              "proxies": proxies
-          }
-
-          with open(
-              "optimized.yaml",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              yaml.safe_dump(
-                  final,
-                  f,
-                  allow_unicode=True,
-                  sort_keys=False
-              )
-
-          PY
-
-
-      # ============================================================
-      # 12. 轉換成 Shadowrocket / V2Ray 訂閱
-      #
-      # 同樣只處理最多 100 個節點，
-      # 不會再把幾千個節點塞進 URL。
-      # ============================================================
-      - name: Build Shadowrocket subscription
-        shell: bash
-        run: |
-          set -e
-
-          python3 <<'PY'
-          import urllib.parse
-
-          with open(
-              "optimized.yaml",
-              "r",
-              encoding="utf-8"
-          ) as f:
-
-              data = f.read()
-
-          encoded = urllib.parse.quote(
-              data,
-              safe=""
-          )
-
-          with open(
-              "optimized-url.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              f.write(encoded)
-
-          PY
-
-          URL=$(cat optimized-url.txt)
-
-          rm -f new-sub.txt
-
-          ok=0
-
-          for retry in 1 2 3; do
-
-            echo "Shadowrocket 轉換：$retry"
-
-            if curl -fsS \
-              --connect-timeout 10 \
-              --max-time 120 \
-              "http://127.0.0.1:25500/sub?target=v2ray&url=${URL}&emoji=false" \
-              -o new-sub.txt; then
-
-              if [ -s new-sub.txt ]; then
-
-                ok=1
-                break
-
-              fi
-
-            fi
-
-            sleep 2
-
-          done
-
-          if [ "$ok" -ne 1 ]; then
-
-            echo "ERROR：Shadowrocket 訂閱轉換失敗"
-
-            cat subconverter.log || true
-
-            exit 1
-
-          fi
-
-          echo
-          echo "最終訂閱節點："
-
-          wc -l new-sub.txt
-
-          head -n 2 new-sub.txt
-
-
-      # ============================================================
-      # 13. 只有成功完成全部流程後才替換 sub.txt
-      # ============================================================
-      - name: Save successful update
-        shell: bash
-        run: |
-          set -e
-
-          if [ ! -s new-sub.txt ]; then
-            echo "ERROR：新訂閱不存在"
-            exit 1
-          fi
-
-          mv new-sub.txt sub.txt
+          # ========================================================
+          # 7. 生成更新報告
+          # ========================================================
 
           NOW=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-
-          TESTED=$(
-            python3 -c \
-              'import json; print(len(json.load(open("tested-nodes.json"))))'
-          )
-
-          FINAL=$(wc -l < sub.txt | tr -d ' ')
 
           cat > daily-report.md <<EOF
 # Node Auto Update
 
-最後成功更新：
-$NOW
+最後更新：$NOW
 
-更新週期：
-每 8 小時
+更新週期：每 8 小時
 
-實測可用：
-$TESTED
+## 節點統計
 
-最終訂閱：
-$FINAL
+- 原始來源：${#SOURCES[@]}
+- 成功來源：$success
+- 失敗來源：$failed
+- 原始節點：$total
+- 去重節點：$UNIQUE
+- 最終節點：$SELECTED
 
-訂閱地址：
+## 更新方式
+
+每 8 小時重新抓取所有來源。
+
+去除重複節點後：
+
+- 隨機抽取最多 100 個節點
+- 不進行測速
+- 不進行延遲排序
+- 不進行 mihomo 測試
+- 不使用 subconverter
+
+## Shadowrocket 訂閱地址
 
 https://twit2er.github.io/daily-node-updater/sub.txt
 EOF
 
+
+          # ========================================================
+          # 8. 顯示結果
+          # ========================================================
+
           echo
+          echo "========================================"
+          echo "更新完成"
+          echo "========================================"
+
           cat daily-report.md
 
+          echo
+          echo "最終節點數：$SELECTED"
+
 
       # ============================================================
-      # 14. Git Commit
+      # 9. 保存訂閱
       # ============================================================
-      - name: Commit update
+      - name: Save subscription
         shell: bash
         run: |
           set -e
@@ -1009,7 +279,7 @@ EOF
           else
 
             git commit \
-              -m "Auto optimize nodes"
+              -m "Auto update node subscription"
 
             git push
 
@@ -1017,47 +287,55 @@ EOF
 
 
       # ============================================================
-      # 15. 寫入更新狀態
-      #
-      # TG bot 以後 /start 只需要讀這個檔案。
+      # 10. Telegram 通知
       # ============================================================
-      - name: Save update status
+      - name: Telegram notification
+        if: success()
         shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -e
 
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+            echo "沒有設定 TELEGRAM_BOT_TOKEN，跳過通知"
+            exit 0
+          fi
+
+          if [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "沒有設定 TELEGRAM_CHAT_ID，跳過通知"
+            exit 0
+          fi
+
           NOW=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
-          TESTED=$(
-            python3 -c \
-              'import json; print(len(json.load(open("tested-nodes.json"))))'
-          )
+          NODE_COUNT=$(wc -l < selected-nodes.txt | tr -d ' ')
 
-          FINAL=$(wc -l < sub.txt | tr -d ' ')
+          MESSAGE="🟢 節點訂閱更新成功
 
-          cat > update-status.json <<EOF
-{
-  "status": "success",
-  "updated_at_utc": "$NOW",
-  "tested_nodes": $TESTED,
-  "final_nodes": $FINAL,
-  "interval_hours": 8,
-  "subscription": "https://twit2er.github.io/daily-node-updater/sub.txt"
-}
-EOF
+⏰ 更新時間：
+${NOW}
 
-          git add update-status.json
+🔄 更新週期：
+每 8 小時
 
-          if git diff --cached --quiet; then
+📦 最終節點：
+${NODE_COUNT} 個
 
-            echo "狀態沒有變化"
+🎲 更新方式：
+重新收集 → 去重 → 隨機抽取
 
-          else
+🔗 訂閱：
+https://twit2er.github.io/daily-node-updater/sub.txt"
 
-            git commit \
-              -m "Update node status"
+          curl -fsS \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MESSAGE}"
 
-            git push
-
-          fi
-```
+          echo
+          echo "Telegram 通知已發送"
