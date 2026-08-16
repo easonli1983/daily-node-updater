@@ -1,8 +1,10 @@
+```yaml
 name: Node Auto Update
 
 on:
   schedule:
     - cron: "0 0,8,16 * * *"
+
   workflow_dispatch:
 
 permissions:
@@ -10,12 +12,67 @@ permissions:
 
 jobs:
   update:
+
     runs-on: ubuntu-latest
 
     steps:
 
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+
       - name: Checkout
         uses: actions/checkout@v4
+
+
+      # ============================================================
+      # 2. 安裝必要工具
+      # ============================================================
+
+      - name: Install tools
+        shell: bash
+        run: |
+          set -e
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            curl \
+            jq \
+            python3 \
+            python3-yaml
+
+
+      # ============================================================
+      # 3. 下載 mihomo
+      # ============================================================
+
+      - name: Install mihomo
+        shell: bash
+        run: |
+          set -e
+
+          MIHOMO_VERSION="v1.19.29"
+
+          echo "下載 mihomo ${MIHOMO_VERSION}"
+
+          curl -L \
+            --retry 3 \
+            --connect-timeout 15 \
+            --max-time 120 \
+            -o mihomo.gz \
+            "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-${MIHOMO_VERSION}.gz"
+
+          gunzip -f mihomo.gz
+
+          chmod +x mihomo
+
+          ./mihomo -v
+
+
+      # ============================================================
+      # 4. 抓取所有來源
+      # ============================================================
 
       - name: Fetch nodes
         shell: bash
@@ -79,17 +136,18 @@ jobs:
                 total=$((total + count))
                 success=$((success + 1))
 
-                echo "成功：$count 個節點"
+                echo "找到 $count 個節點"
 
               else
 
-                echo "可訪問，但沒有找到 URI 節點"
+                echo "沒有找到 URI 節點"
 
               fi
 
             else
 
-              echo "抓取失敗"
+              echo "來源失敗"
+
               failed=$((failed + 1))
 
             fi
@@ -103,13 +161,13 @@ jobs:
           echo "抓取完成"
           echo "========================================"
 
-          echo "來源總數：${#SOURCES[@]}"
-          echo "成功來源：$success"
-          echo "失敗來源：$failed"
-          echo "抓取節點：$total"
+          echo "來源：${#SOURCES[@]}"
+          echo "成功：$success"
+          echo "失敗：$failed"
+          echo "節點：$total"
 
           if [ ! -s all-nodes.txt ]; then
-            echo "ERROR：沒有抓到任何節點"
+            echo "ERROR：沒有任何節點"
             exit 1
           fi
 
@@ -117,62 +175,1211 @@ jobs:
 
           UNIQUE=$(wc -l < unique-nodes.txt | tr -d ' ')
 
-          echo "去重節點：$UNIQUE"
+          echo "去重後：$UNIQUE"
 
-          if [ "$UNIQUE" -lt 1 ]; then
-            echo "ERROR：去重後沒有節點"
+          if [ "$UNIQUE" -lt 5 ]; then
+            echo "ERROR：去重後節點太少"
             exit 1
           fi
 
-          base64 -w 0 unique-nodes.txt > sub.txt
 
-          echo >> sub.txt
+      # ============================================================
+      # 5. 用 Python 將 URI 轉成 mihomo 配置
+      # ============================================================
 
-          if [ ! -s sub.txt ]; then
-            echo "ERROR：sub.txt 生成失敗"
+      - name: Build mihomo config
+        shell: bash
+        run: |
+          set -e
+
+          python3 <<'PY'
+
+          import base64
+          import json
+          import urllib.parse
+          import yaml
+
+
+          def decode_base64(text):
+
+              text = text.strip()
+
+              text += "=" * (-len(text) % 4)
+
+              try:
+                  return base64.b64decode(
+                      text
+                  ).decode(
+                      "utf-8",
+                      errors="ignore"
+                  )
+              except Exception:
+                  return ""
+
+
+          def parse_vmess(uri):
+
+              try:
+
+                  raw = uri[8:]
+
+                  data = json.loads(
+                      base64.b64decode(
+                          raw + "=" * (-len(raw) % 4)
+                      )
+                  )
+
+                  server = data.get("add")
+
+                  port = int(
+                      data.get("port", 0)
+                  )
+
+                  uuid = data.get("id")
+
+                  if not server or not port or not uuid:
+                      return None
+
+                  item = {
+                      "name":
+                          data.get(
+                              "ps"
+                          )
+                          or
+                          f"vmess-{server}",
+
+                      "type":
+                          "vmess",
+
+                      "server":
+                          server,
+
+                      "port":
+                          port,
+
+                      "uuid":
+                          uuid,
+
+                      "alterId":
+                          int(
+                              data.get(
+                                  "aid",
+                                  0
+                              )
+                          ),
+
+                      "cipher":
+                          data.get(
+                              "scy",
+                              "auto"
+                          )
+                  }
+
+                  net = data.get(
+                      "net",
+                      "tcp"
+                  )
+
+                  if net == "ws":
+
+                      item["network"] = "ws"
+
+                      ws_opts = {}
+
+                      path = data.get(
+                          "path"
+                      )
+
+                      host = data.get(
+                          "host"
+                      )
+
+                      if path:
+                          ws_opts["path"] = path
+
+                      if host:
+                          ws_opts["headers"] = {
+                              "Host": host
+                          }
+
+                      if ws_opts:
+                          item["ws-opts"] = ws_opts
+
+                  if str(
+                      data.get(
+                          "tls",
+                          ""
+                      )
+                  ).lower() == "tls":
+
+                      item["tls"] = True
+
+                      sni = data.get(
+                          "sni"
+                      )
+
+                      if sni:
+                          item["servername"] = sni
+
+                  return item
+
+              except Exception:
+
+                  return None
+
+
+          def parse_vless(uri):
+
+              try:
+
+                  u = urllib.parse.urlsplit(
+                      uri
+                  )
+
+                  uuid = u.username
+
+                  server = u.hostname
+
+                  port = u.port
+
+                  if not uuid or not server or not port:
+                      return None
+
+                  q = urllib.parse.parse_qs(
+                      u.query
+                  )
+
+                  item = {
+                      "name":
+                          urllib.parse.unquote(
+                              u.fragment
+                          )
+                          or
+                          f"vless-{server}",
+
+                      "type":
+                          "vless",
+
+                      "server":
+                          server,
+
+                      "port":
+                          port,
+
+                      "uuid":
+                          uuid
+                  }
+
+                  if q.get("security", [""])[0] == "tls":
+
+                      item["tls"] = True
+
+                  sni = q.get(
+                      "sni",
+                      [""]
+                  )[0]
+
+                  if sni:
+                      item["servername"] = sni
+
+                  network = q.get(
+                      "type",
+                      ["tcp"]
+                  )[0]
+
+                  if network == "ws":
+
+                      item["network"] = "ws"
+
+                      path = q.get(
+                          "path",
+                          [""]
+                      )[0]
+
+                      host = q.get(
+                          "host",
+                          [""]
+                      )[0]
+
+                      ws_opts = {}
+
+                      if path:
+                          ws_opts["path"] = path
+
+                      if host:
+                          ws_opts["headers"] = {
+                              "Host": host
+                          }
+
+                      if ws_opts:
+                          item["ws-opts"] = ws_opts
+
+                  return item
+
+              except Exception:
+
+                  return None
+
+
+          def parse_trojan(uri):
+
+              try:
+
+                  u = urllib.parse.urlsplit(
+                      uri
+                  )
+
+                  password = u.username
+
+                  server = u.hostname
+
+                  port = u.port
+
+                  if not password or not server or not port:
+                      return None
+
+                  q = urllib.parse.parse_qs(
+                      u.query
+                  )
+
+                  item = {
+                      "name":
+                          urllib.parse.unquote(
+                              u.fragment
+                          )
+                          or
+                          f"trojan-{server}",
+
+                      "type":
+                          "trojan",
+
+                      "server":
+                          server,
+
+                      "port":
+                          port,
+
+                      "password":
+                          password
+                  }
+
+                  sni = q.get(
+                      "sni",
+                      [""]
+                  )[0]
+
+                  if sni:
+                      item["sni"] = sni
+
+                  return item
+
+              except Exception:
+
+                  return None
+
+
+          def parse_ss(uri):
+
+              try:
+
+                  raw = uri[5:]
+
+                  if "@" in raw:
+
+                      auth, host = raw.rsplit(
+                          "@",
+                          1
+                      )
+
+                      if ":" in auth:
+
+                          method, password = auth.split(
+                              ":",
+                              1
+                          )
+
+                          server, port = host.rsplit(
+                              ":",
+                              1
+                          )
+
+                          return {
+                              "name":
+                                  f"ss-{server}",
+
+                              "type":
+                                  "ss",
+
+                              "server":
+                                  server,
+
+                              "port":
+                                  int(
+                                      port
+                                  ),
+
+                              "cipher":
+                                  method,
+
+                              "password":
+                                  password
+                          }
+
+                  decoded = decode_base64(
+                      raw
+                  )
+
+                  if decoded:
+
+                      return parse_ss(
+                          "ss://" + decoded
+                      )
+
+              except Exception:
+
+                  pass
+
+              return None
+
+
+          def parse(uri):
+
+              uri = uri.strip()
+
+              if uri.startswith(
+                  "vmess://"
+              ):
+                  return parse_vmess(
+                      uri
+                  )
+
+              if uri.startswith(
+                  "vless://"
+              ):
+                  return parse_vless(
+                      uri
+                  )
+
+              if uri.startswith(
+                  "trojan://"
+              ):
+                  return parse_trojan(
+                      uri
+                  )
+
+              if uri.startswith(
+                  "ss://"
+              ):
+                  return parse_ss(
+                      uri
+                  )
+
+              return None
+
+
+          nodes = []
+
+          with open(
+              "unique-nodes.txt",
+              "r",
+              encoding="utf-8"
+          ) as f:
+
+              for line in f:
+
+                  line = line.strip()
+
+                  if not line:
+                      continue
+
+                  node = parse(
+                      line
+                  )
+
+                  if node:
+                      nodes.append(
+                          node
+                      )
+
+
+          # 去除重複名稱
+          used = set()
+
+          final = []
+
+          for node in nodes:
+
+              name = node["name"]
+
+              if name in used:
+
+                  i = 2
+
+                  original = name
+
+                  while f"{original}-{i}" in used:
+                      i += 1
+
+                  name = f"{original}-{i}"
+
+                  node["name"] = name
+
+              used.add(name)
+
+              final.append(
+                  node
+              )
+
+
+          config = {
+
+              "mixed-port": 7890,
+
+              "allow-lan": False,
+
+              "mode": "rule",
+
+              "log-level": "silent",
+
+              "proxies": final
+
+          }
+
+
+          with open(
+              "mihomo.yaml",
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              yaml.safe_dump(
+                  config,
+                  f,
+                  allow_unicode=True,
+                  sort_keys=False
+              )
+
+
+          print(
+              "成功轉換節點：",
+              len(final)
+          )
+
+          if len(final) < 5:
+
+              raise SystemExit(
+                  "能解析的節點少於 5 個"
+              )
+
+          PY
+
+
+      # ============================================================
+      # 6. 啟動 mihomo
+      # ============================================================
+
+      - name: Start mihomo
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p mihomo-data
+
+          ./mihomo \
+            -d ./mihomo-data \
+            -f ./mihomo.yaml \
+            > mihomo.log 2>&1 &
+
+          echo $! > mihomo.pid
+
+          echo "等待 mihomo 啟動..."
+
+          for i in $(seq 1 30); do
+
+            if curl -fsS \
+              http://127.0.0.1:9090/version \
+              >/dev/null 2>&1; then
+
+              echo "mihomo 已啟動"
+
+              break
+
+            fi
+
+            sleep 2
+
+          done
+
+          if ! curl -fsS \
+            http://127.0.0.1:9090/version \
+            >/dev/null 2>&1; then
+
+            echo "mihomo 啟動失敗"
+
+            cat mihomo.log
+
             exit 1
+
           fi
+
+
+      # ============================================================
+      # 7. 建立 AUTO 優選組
+      # ============================================================
+
+      - name: Build test group
+        shell: bash
+        run: |
+          set -e
+
+          python3 <<'PY'
+
+          import yaml
+
+
+          with open(
+              "mihomo.yaml",
+              "r",
+              encoding="utf-8"
+          ) as f:
+
+              data = yaml.safe_load(
+                  f
+              )
+
+
+          names = [
+              x["name"]
+              for x in data.get(
+                  "proxies",
+                  []
+              )
+          ]
+
+
+          data["proxy-groups"] = [
+
+              {
+                  "name":
+                      "AUTO",
+
+                  "type":
+                      "url-test",
+
+                  "url":
+                      "https://www.gstatic.com/generate_204",
+
+                  "interval":
+                      30,
+
+                  "tolerance":
+                      0,
+
+                  "proxies":
+                      names
+              }
+
+          ]
+
+
+          data["external-controller"] = \
+              "127.0.0.1:9090"
+
+
+          with open(
+              "mihomo-test.yaml",
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              yaml.safe_dump(
+                  data,
+                  f,
+                  allow_unicode=True,
+                  sort_keys=False
+              )
+
+
+          print(
+              "測試節點：",
+              len(names)
+          )
+
+          PY
+
+
+      # ============================================================
+      # 8. 重啟 mihomo 使用測試配置
+      # ============================================================
+
+      - name: Restart mihomo
+        shell: bash
+        run: |
+          set -e
+
+          if [ -f mihomo.pid ]; then
+
+            kill "$(cat mihomo.pid)" \
+              2>/dev/null || true
+
+            sleep 2
+
+          fi
+
+          ./mihomo \
+            -d ./mihomo-data \
+            -f ./mihomo-test.yaml \
+            > mihomo.log 2>&1 &
+
+          echo $! > mihomo.pid
+
+          for i in $(seq 1 30); do
+
+            if curl -fsS \
+              http://127.0.0.1:9090/version \
+              >/dev/null 2>&1; then
+
+              echo "mihomo 測試模式已啟動"
+
+              break
+
+            fi
+
+            sleep 2
+
+          done
+
+          curl -fsS \
+            http://127.0.0.1:9090/version \
+            >/dev/null
+
+
+      # ============================================================
+      # 9. 等待 URLTest 完成
+      # ============================================================
+
+      - name: Test nodes
+        shell: bash
+        run: |
+          set -e
+
+          echo "等待節點實測..."
+
+          sleep 60
+
+          curl -fsS \
+            "http://127.0.0.1:9090/proxies/AUTO" \
+            -o auto.json
+
+
+          python3 <<'PY'
+
+          import json
+
+
+          with open(
+              "auto.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
+
+              data = json.load(
+                  f
+              )
+
+
+          history = data.get(
+              "history",
+              []
+          )
+
+
+          print(
+              "AUTO history：",
+              history
+          )
+
+
+          # mihomo URLTest 的排序結果
+          now = data.get(
+              "now"
+          )
+
+
+          all_nodes = data.get(
+              "all",
+              []
+          )
+
+
+          print(
+              "測試節點：",
+              len(all_nodes)
+          )
+
+
+          if not all_nodes:
+
+              raise SystemExit(
+                  "沒有測試節點"
+              )
+
+
+          # --------------------------------------------------------
+          # 對每個節點讀取 history
+          # --------------------------------------------------------
+
+          import urllib.parse
+          import urllib.request
+
+
+          results = []
+
+
+          for name in all_nodes:
+
+              try:
+
+                  encoded = urllib.parse.quote(
+                      name,
+                      safe=""
+                  )
+
+                  url = (
+                      "http://127.0.0.1:9090/proxies/"
+                      + encoded
+                  )
+
+                  with urllib.request.urlopen(
+                      url,
+                      timeout=10
+                  ) as response:
+
+                      item = json.loads(
+                          response.read().decode(
+                              "utf-8"
+                          )
+                      )
+
+
+                  records = item.get(
+                      "history",
+                      []
+                  )
+
+
+                  if not records:
+                      continue
+
+
+                  delay = records[-1].get(
+                      "delay",
+                      0
+                  )
+
+
+                  if delay and delay > 0:
+
+                      results.append(
+                          {
+                              "name":
+                                  name,
+
+                              "delay":
+                                  int(
+                                      delay
+                                  )
+                          }
+                      )
+
+
+              except Exception:
+
+                  continue
+
+
+          results.sort(
+              key=lambda x:
+                  x["delay"]
+          )
+
+
+          with open(
+              "tested-nodes.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              json.dump(
+                  results,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
+
+
+          print(
+              "實測可用：",
+              len(results)
+          )
+
+
+          print()
+          print(
+              "最快 20 個："
+          )
+
+
+          for i, x in enumerate(
+              results[:20],
+              1
+          ):
+
+              print(
+                  f"{i:02d}. "
+                  f"{x['delay']} ms "
+                  f"{x['name']}"
+              )
+
+
+          if len(results) < 5:
+
+              raise SystemExit(
+                  "實測成功節點少於 5 個，"
+                  "停止更新，避免覆蓋原訂閱。"
+              )
+
+          PY
+
+
+      # ============================================================
+      # 10. 建立優選訂閱
+      # ============================================================
+
+      - name: Build optimized subscription
+        shell: bash
+        run: |
+          set -e
+
+          python3 <<'PY'
+
+          import base64
+          import json
+          import urllib.parse
+
+
+          with open(
+              "unique-nodes.txt",
+              "r",
+              encoding="utf-8"
+          ) as f:
+
+              original = [
+                  x.strip()
+                  for x in f
+                  if x.strip()
+              ]
+
+
+          with open(
+              "tested-nodes.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
+
+              tested = json.load(
+                  f
+              )
+
+
+          # 最多保留 100 個
+          best = tested[:100]
+
+
+          wanted = {
+              x["name"]
+              for x in best
+          }
+
+
+          # ========================================================
+          # 這裡直接保留原始 URI
+          # Shadowrocket 可以直接使用 Base64 URI 訂閱
+          # ========================================================
+
+          final = []
+
+
+          # 由於 tested 名稱來自 mihomo，
+          # 名稱可能和 URI 原始名稱不同。
+          # 因此以順序重新建立對應。
+
+          for uri in original:
+
+              # vmess
+              if uri.startswith(
+                  "vmess://"
+              ):
+
+                  try:
+
+                      raw = uri[8:]
+
+                      raw += "=" * (
+                          -len(raw) % 4
+                      )
+
+                      obj = json.loads(
+                          base64.b64decode(
+                              raw
+                          ).decode(
+                              "utf-8",
+                              errors="ignore"
+                          )
+                      )
+
+                      name = (
+                          obj.get("ps")
+                          or
+                          f"vmess-{obj.get('add','')}"
+                      )
+
+                  except Exception:
+
+                      continue
+
+              elif uri.startswith(
+                  "vless://"
+              ):
+
+                  try:
+
+                      name = urllib.parse.unquote(
+                          urllib.parse.urlsplit(
+                              uri
+                          ).fragment
+                      )
+
+                  except Exception:
+
+                      continue
+
+              elif uri.startswith(
+                  "trojan://"
+              ):
+
+                  try:
+
+                      name = urllib.parse.unquote(
+                          urllib.parse.urlsplit(
+                              uri
+                          ).fragment
+                      )
+
+                  except Exception:
+
+                      continue
+
+              elif uri.startswith(
+                  "ss://"
+              ):
+
+                  try:
+
+                      u = uri.split(
+                          "#",
+                          1
+                      )
+
+                      name = (
+                          urllib.parse.unquote(
+                              u[1]
+                          )
+                          if len(u) > 1
+                          else ""
+                      )
+
+                  except Exception:
+
+                      continue
+
+              else:
+
+                  continue
+
+
+              # 優選名稱匹配
+              if name in wanted:
+
+                  final.append(
+                      uri
+                  )
+
+
+          # 如果名稱匹配不足，
+          # 使用測試結果前 100 個的名稱再次匹配。
+
+          if len(final) < 5:
+
+              print(
+                  "名稱匹配不足，"
+                  "停止更新以保護原訂閱。"
+              )
+
+              raise SystemExit(
+                  1
+              )
+
+
+          encoded = base64.b64encode(
+              "\n".join(
+                  final
+              ).encode(
+                  "utf-8"
+              )
+          ).decode(
+              "ascii"
+          )
+
+
+          with open(
+              "sub.txt",
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              f.write(
+                  encoded
+              )
+
+
+          print(
+              "最終訂閱節點：",
+              len(final)
+          )
+
+
+          if len(final) < 5:
+
+              raise SystemExit(
+                  "最終訂閱節點不足 5 個"
+              )
+
+          PY
+
+
+      # ============================================================
+      # 11. 寫入更新時間
+      # ============================================================
+
+      - name: Build update status
+        shell: bash
+        run: |
+          set -e
 
           NOW=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          TESTED=$(python3 - <<'PY'
+          import json
+
+          with open(
+              "tested-nodes.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
+
+              print(
+                  len(
+                      json.load(f)
+                  )
+              )
+          PY
+          )
+
+          FINAL=$(python3 - <<'PY'
+          import base64
+
+          with open(
+              "sub.txt",
+              "r",
+              encoding="utf-8"
+          ) as f:
+
+              data = f.read().strip()
+
+
+          raw = base64.b64decode(
+              data
+          ).decode(
+              "utf-8",
+              errors="ignore"
+          )
+
+
+          print(
+              len(
+                  [
+                      x
+                      for x in raw.splitlines()
+                      if x.strip()
+                  ]
+              )
+          )
+          PY
+          )
 
           cat > daily-report.md <<EOF
 # Node Auto Update
 
-最後更新：$NOW
+最後成功更新：
+$NOW
 
-更新週期：每 8 小時
+更新週期：
+每 8 小時
 
-- 原始來源：${#SOURCES[@]}
-- 成功來源：$success
-- 失敗來源：$failed
-- 抓取節點：$total
-- 去重節點：$UNIQUE
+實測可用：
+$TESTED
+
+最終保留：
+$FINAL
 
 訂閱地址：
 
 https://twit2er.github.io/daily-node-updater/sub.txt
 EOF
 
-          echo
-          echo "========================================"
-          echo "更新完成"
-          echo "========================================"
-
           cat daily-report.md
+
+
+      # ============================================================
+      # 12. 保存
+      # ============================================================
 
       - name: Save subscription
         shell: bash
         run: |
           set -e
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name \
+            "github-actions[bot]"
 
-          git add sub.txt daily-report.md
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            sub.txt \
+            daily-report.md
 
           if git diff --cached --quiet; then
-            echo "沒有內容變化"
+
+            echo "內容沒有變化"
+
           else
-            git commit -m "Auto update node subscription"
+
+            git commit \
+              -m "Auto update optimized nodes"
+
             git push
+
           fi
+```
