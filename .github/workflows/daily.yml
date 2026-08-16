@@ -160,7 +160,7 @@ jobs:
           <p>節點檢測已完成。</p>
 
           <ul>
-            <li>最終節點：{len(nodes)}</li>
+              <li>最終節點：{len(nodes)}</li>
           </ul>
 
           <hr>
@@ -242,7 +242,9 @@ jobs:
           req = urllib.request.Request(
               url,
               data=json.dumps(data).encode("utf-8"),
-              headers={"Content-Type": "application/json"},
+              headers={
+                  "Content-Type": "application/json"
+              },
               method="POST"
           )
 
