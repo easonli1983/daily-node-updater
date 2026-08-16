@@ -5,6 +5,9 @@ on:
     - cron: "0 1 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   daily:
     runs-on: ubuntu-latest
@@ -13,8 +16,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run daily task
+      - name: Create daily report
         run: |
           echo "Daily update started."
+          echo ""
+          echo "Date:"
           date -u
-          echo "Daily update completed."
+          echo ""
+          echo "Daily update completed." > daily-report.txt
+
+      - name: Save report
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add daily-report.txt
+          git diff --cached --quiet || git commit -m "Update daily report"
+          git push
