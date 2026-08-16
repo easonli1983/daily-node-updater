@@ -1,3 +1,4 @@
+```yaml
 name: Node Auto Optimizer
 
 on:
@@ -31,7 +32,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y curl jq python3 python3-yaml
 
-          echo "下載 subconverter"
+          echo "安裝 subconverter"
 
           docker pull ghcr.io/metacubex/subconverter:latest
 
@@ -40,10 +41,12 @@ jobs:
           MIHOMO_VERSION="v1.19.29"
 
           curl -L \
+            --fail \
+            --retry 3 \
             "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-${MIHOMO_VERSION}.gz" \
             -o mihomo.gz
 
-          gunzip mihomo.gz
+          gunzip -f mihomo.gz
 
           chmod +x mihomo
 
@@ -51,18 +54,147 @@ jobs:
 
 
       # ============================================================
-      # 3. 啟動 subconverter
+      # 3. 抓取節點
+      # ============================================================
+      - name: Fetch nodes
+        run: |
+          set -e
+
+          rm -f all-nodes.txt
+          rm -f unique-nodes.txt
+          rm -f sub.txt
+          rm -f clash.yaml
+          rm -f optimized.yaml
+          rm -f tested-nodes.json
+          rm -f daily-report.md
+
+          SOURCES=(
+            "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt"
+            "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt"
+            "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt"
+            "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/clash.yml"
+            "https://cdn.jsdelivr.net/gh/vxiaov/free_proxies@main/clash/clash.provider.yaml"
+            "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub"
+            "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.yml"
+            "https://raw.githubusercontent.com/ts-sf/fly/main/clash"
+          )
+
+          total=0
+          success=0
+          failed=0
+          index=0
+
+          echo "================================"
+          echo "開始抓取節點"
+          echo "================================"
+
+          touch all-nodes.txt
+
+          for url in "${SOURCES[@]}"; do
+
+            index=$((index + 1))
+
+            echo
+            echo "[$index/${#SOURCES[@]}]"
+            echo "$url"
+
+            tmp="source-${index}.txt"
+
+            if curl -L \
+              --fail \
+              --connect-timeout 10 \
+              --max-time 40 \
+              --retry 2 \
+              --retry-delay 2 \
+              -A "Mozilla/5.0" \
+              -sS \
+              "$url" \
+              -o "$tmp"; then
+
+              count=$(grep -Eo \
+                '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
+                "$tmp" 2>/dev/null | wc -l)
+
+              if [ "$count" -gt 0 ]; then
+
+                echo "識別到 $count 個 URI 節點"
+
+                grep -Eo \
+                  '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
+                  "$tmp" >> all-nodes.txt
+
+                total=$((total + count))
+                success=$((success + 1))
+
+              else
+
+                echo "沒有識別到 URI 節點"
+
+              fi
+
+            else
+
+              echo "來源抓取失敗"
+              failed=$((failed + 1))
+
+            fi
+
+            rm -f "$tmp"
+
+          done
+
+          echo
+          echo "================================"
+          echo "抓取完成"
+          echo "================================"
+
+          echo "來源：${#SOURCES[@]}"
+          echo "成功：$success"
+          echo "失敗：$failed"
+          echo "抓取節點：$total"
+
+          if [ ! -s all-nodes.txt ]; then
+            echo "沒有抓取到任何節點"
+            exit 1
+          fi
+
+          sort -u all-nodes.txt > unique-nodes.txt
+
+          UNIQUE=$(wc -l < unique-nodes.txt)
+
+          echo "去重後節點：$UNIQUE"
+
+          if [ "$UNIQUE" -lt 5 ]; then
+            echo "去重後節點少於 5 個，停止更新"
+            exit 1
+          fi
+
+
+      # ============================================================
+      # 4. 啟動 subconverter
+      #
+      # 關鍵修正：
+      # 不再把所有節點塞進 URL 參數。
+      #
+      # 而是把 GitHub Actions 工作目錄掛載到容器：
+      #
+      # /workspace/unique-nodes.txt
+      #
+      # subconverter 直接讀取這個文件。
       # ============================================================
       - name: Start subconverter
         run: |
           set -e
 
+          docker rm -f subconverter 2>/dev/null || true
+
           docker run -d \
             --name subconverter \
             -p 25500:25500 \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
             ghcr.io/metacubex/subconverter:latest
 
-          echo "等待 subconverter..."
+          echo "等待 subconverter 啟動"
 
           for i in $(seq 1 30); do
 
@@ -86,166 +218,29 @@ jobs:
 
 
       # ============================================================
-      # 4. 抓取所有來源
+      # 5. URI → Clash
+      #
+      # 使用文件，不使用超長 URL。
       # ============================================================
-      - name: Fetch sources
+      - name: Convert nodes to Clash
         run: |
           set -e
 
-          rm -f all-nodes.txt
-          rm -f unique-nodes.txt
-          rm -f source-*.txt
-
-          SOURCES=(
-            "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt"
-            "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt"
-            "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt"
-            "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/clash.yml"
-            "https://cdn.jsdelivr.net/gh/vxiaov/free_proxies@main/clash/clash.provider.yaml"
-            "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub"
-            "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.yml"
-            "https://raw.githubusercontent.com/ts-sf/fly/main/clash"
-          )
-
-          TOTAL=0
-          SUCCESS=0
-          FAILED=0
-          INDEX=0
-
-          echo "================================"
-          echo "開始抓取節點"
-          echo "================================"
-
-          for URL in "${SOURCES[@]}"; do
-
-            INDEX=$((INDEX + 1))
-
-            echo
-            echo "[$INDEX/${#SOURCES[@]}]"
-            echo "$URL"
-
-            FILE="source-${INDEX}.txt"
-
-            if curl -L \
-              --connect-timeout 10 \
-              --max-time 45 \
-              --retry 2 \
-              --retry-delay 2 \
-              -A "Mozilla/5.0" \
-              -fsS \
-              "$URL" \
-              -o "$FILE"; then
-
-              echo "抓取成功"
-
-              # --------------------------------------------------
-              # 直接 URI
-              # --------------------------------------------------
-
-              URI_COUNT=$(grep -Eo \
-                '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
-                "$FILE" \
-                2>/dev/null \
-                | wc -l)
-
-              if [ "$URI_COUNT" -gt 0 ]; then
-
-                echo "發現 URI：$URI_COUNT"
-
-                grep -Eo \
-                  '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
-                  "$FILE" \
-                  >> all-nodes.txt
-
-                TOTAL=$((TOTAL + URI_COUNT))
-
-              fi
-
-              SUCCESS=$((SUCCESS + 1))
-
-            else
-
-              echo "抓取失敗"
-
-              FAILED=$((FAILED + 1))
-
-            fi
-
-          done
-
-          echo
-          echo "================================"
-          echo "抓取統計"
-          echo "================================"
-
-          echo "來源：${#SOURCES[@]}"
-          echo "成功：$SUCCESS"
-          echo "失敗：$FAILED"
-          echo "URI：$TOTAL"
-
-          if [ ! -s all-nodes.txt ]; then
-            echo "沒有取得任何節點"
-            exit 1
-          fi
-
-          sort -u all-nodes.txt > unique-nodes.txt
-
-          UNIQUE=$(wc -l < unique-nodes.txt)
-
-          echo "去重後：$UNIQUE"
-
-          if [ "$UNIQUE" -lt 5 ]; then
-            echo "去重後節點太少，停止更新"
-            exit 1
-          fi
-
-          echo "$TOTAL" > total_count.txt
-          echo "$UNIQUE" > unique_count.txt
-
-
-      # ============================================================
-      # 5. 使用 subconverter 將節點轉成 Clash
-      # ============================================================
-      - name: Convert to Clash
-        run: |
-          set -e
-
-          ABS_PATH="$PWD/unique-nodes.txt"
+          echo "開始把節點轉成 Clash"
 
           echo "輸入文件："
-          echo "$ABS_PATH"
-
-          python3 - <<'PY'
-          import urllib.parse
-          import os
-
-          path = os.path.abspath("unique-nodes.txt")
-
-          encoded = urllib.parse.quote(
-              path,
-              safe=""
-          )
-
-          with open(
-              "encoded_source.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              f.write(encoded)
-
-          print("subconverter 文件路徑：")
-          print(path)
-          PY
-
-          URL=$(cat encoded_source.txt)
+          echo "${GITHUB_WORKSPACE}/unique-nodes.txt"
 
           curl -fsS \
             --max-time 180 \
-            "http://127.0.0.1:25500/sub?target=clash&url=${URL}&emoji=false" \
+            "http://127.0.0.1:25500/sub?target=clash&url=file:///workspace/unique-nodes.txt&emoji=false" \
             -o clash.yaml
 
+          echo
+          echo "Clash 配置生成完成"
+
           if [ ! -s clash.yaml ]; then
-            echo "Clash 配置生成失敗"
+            echo "Clash 配置為空"
             exit 1
           fi
 
@@ -254,27 +249,20 @@ jobs:
           python3 - <<'PY'
           import yaml
 
-          with open(
-              "clash.yaml",
-              "r",
-              encoding="utf-8"
-          ) as f:
-
+          with open("clash.yaml", "r", encoding="utf-8") as f:
               data = yaml.safe_load(f)
 
           proxies = data.get("proxies", [])
 
-          print("Clash 節點：", len(proxies))
+          print("Clash 節點數：", len(proxies))
 
           if len(proxies) < 5:
-              raise SystemExit(
-                  "Clash 節點少於 5 個"
-              )
+              raise SystemExit("Clash 節點少於 5 個，停止更新")
           PY
 
 
       # ============================================================
-      # 6. 建立 mihomo 測速配置
+      # 6. 建立 mihomo 配置
       # ============================================================
       - name: Build mihomo config
         run: |
@@ -283,12 +271,7 @@ jobs:
           python3 - <<'PY'
           import yaml
 
-          with open(
-              "clash.yaml",
-              "r",
-              encoding="utf-8"
-          ) as f:
-
+          with open("clash.yaml", "r", encoding="utf-8") as f:
               data = yaml.safe_load(f)
 
           proxies = data.get("proxies", [])
@@ -300,19 +283,13 @@ jobs:
               if not isinstance(proxy, dict):
                   continue
 
-              name = proxy.get("name")
-
-              if not name:
-                  name = f"node-{i}"
-
-              proxy["name"] = str(name)
+              if not proxy.get("name"):
+                  proxy["name"] = f"node-{i}"
 
               clean.append(proxy)
 
-          names = [
-              p["name"]
-              for p in clean
-          ]
+          if len(clean) < 5:
+              raise SystemExit("有效 Clash 節點少於 5 個")
 
           data["proxies"] = clean
 
@@ -322,25 +299,7 @@ jobs:
 
           data["secret"] = ""
 
-          data["proxy-groups"] = [
-              {
-                  "name": "AUTO",
-                  "type": "url-test",
-                  "url": "https://www.gstatic.com/generate_204",
-                  "interval": 30,
-                  "timeout": 10000,
-                  "tolerance": 0,
-                  "lazy": False,
-                  "proxies": names
-              }
-          ]
-
-          with open(
-              "mihomo.yaml",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
+          with open("mihomo.yaml", "w", encoding="utf-8") as f:
               yaml.safe_dump(
                   data,
                   f,
@@ -348,7 +307,8 @@ jobs:
                   sort_keys=False
               )
 
-          print("mihomo 節點：", len(clean))
+          print("mihomo 配置完成")
+          print("測試節點：", len(clean))
           PY
 
 
@@ -368,20 +328,18 @@ jobs:
 
           echo $! > mihomo.pid
 
-          echo "等待 mihomo..."
+          echo "等待 mihomo 啟動"
 
           READY=0
 
-          for i in $(seq 1 40); do
+          for i in $(seq 1 30); do
 
             if curl -fsS \
               http://127.0.0.1:9090/version \
               > /dev/null 2>&1; then
 
               READY=1
-
               echo "mihomo 已啟動"
-
               break
 
             fi
@@ -390,105 +348,117 @@ jobs:
 
           done
 
-          if [ "$READY" != "1" ]; then
-
+          if [ "$READY" -ne 1 ]; then
             echo "mihomo 啟動失敗"
-
             cat mihomo.log
-
             exit 1
-
           fi
 
           curl -fsS \
             http://127.0.0.1:9090/version
 
-          echo
-
 
       # ============================================================
-      # 8. 等待第一次完整測速
-      # ============================================================
-      - name: Wait for node testing
-        run: |
-          set -e
-
-          echo "等待 mihomo 完成節點測試..."
-
-          sleep 90
-
-          echo "開始讀取測速結果"
-
-
-      # ============================================================
-      # 9. 讀取實際測速結果
+      # 8. 實際逐個測試節點
+      #
+      # 這裡不依賴 url-test group。
+      #
+      # 直接要求 mihomo 對每一個節點做延遲測試。
       # ============================================================
       - name: Test nodes
         run: |
           set -e
 
+          echo
+          echo "================================"
+          echo "開始實際測試節點"
+          echo "================================"
+
           python3 - <<'PY'
+          import yaml
           import json
-          import urllib.parse
           import urllib.request
+          import urllib.parse
+          import urllib.error
           import time
 
-          API = "http://127.0.0.1:9090"
+          with open("clash.yaml", "r", encoding="utf-8") as f:
+              data = yaml.safe_load(f)
 
-          with urllib.request.urlopen(
-              API + "/proxies",
-              timeout=20
-          ) as r:
+          proxies = data.get("proxies", [])
 
-              data = json.loads(
-                  r.read().decode("utf-8")
-              )
-
-          proxies = data.get(
-              "proxies",
-              {}
-          )
+          print("待測試節點：", len(proxies))
 
           results = []
 
-          for name, info in proxies.items():
+          test_url = "https://www.gstatic.com/generate_204"
 
-              if name in (
-                  "DIRECT",
-                  "REJECT",
-                  "GLOBAL",
-                  "AUTO"
-              ):
+          for index, proxy in enumerate(proxies, 1):
+
+              name = proxy.get("name")
+
+              if not name:
                   continue
 
-              if not isinstance(info, dict):
-                  continue
-
-              history = info.get(
-                  "history",
-                  []
+              encoded_name = urllib.parse.quote(
+                  name,
+                  safe=""
               )
 
-              if not history:
-                  continue
-
-              delay = history[-1].get(
-                  "delay",
-                  0
+              api = (
+                  "http://127.0.0.1:9090/proxies/"
+                  + encoded_name
+                  + "/delay?"
+                  + urllib.parse.urlencode({
+                      "url": test_url,
+                      "timeout": "8000"
+                  })
               )
 
               try:
-                  delay = int(delay)
-              except Exception:
-                  continue
 
-              if delay <= 0:
-                  continue
+                  req = urllib.request.Request(
+                      api,
+                      method="GET"
+                  )
 
-              results.append({
-                  "name": name,
-                  "delay": delay
-              })
+                  with urllib.request.urlopen(
+                      req,
+                      timeout=12
+                  ) as response:
+
+                      body = json.loads(
+                          response.read().decode("utf-8")
+                      )
+
+                  delay = body.get("delay", 0)
+
+                  if isinstance(delay, int) and delay > 0:
+
+                      results.append({
+                          "name": name,
+                          "delay": delay
+                      })
+
+                      print(
+                          f"[{index}/{len(proxies)}] "
+                          f"OK {delay} ms "
+                          f"{name}"
+                      )
+
+                  else:
+
+                      print(
+                          f"[{index}/{len(proxies)}] "
+                          f"FAIL {name}"
+                      )
+
+              except Exception as e:
+
+                  print(
+                      f"[{index}/{len(proxies)}] "
+                      f"FAIL {name}"
+                  )
 
           results.sort(
               key=lambda x: x["delay"]
@@ -508,16 +478,14 @@ jobs:
               )
 
           print()
-          print("==============================")
-          print("實測結果")
-          print("==============================")
+          print("================================")
+          print("測試完成")
+          print("================================")
 
-          print(
-              "可用節點：",
-              len(results)
-          )
+          print("實測可用：", len(results))
 
           print()
+          print("最快 20 個：")
 
           for i, item in enumerate(
               results[:20],
@@ -526,22 +494,18 @@ jobs:
 
               print(
                   f"{i:02d}. "
-                  f"{item['delay']} ms  "
-                  f"{item['name']}"
+                  f"{item['delay']} ms"
               )
 
           if len(results) < 5:
-
               raise SystemExit(
-                  "實測成功節點少於 5 個，"
-                  "停止更新，保留上一份訂閱。"
+                  "實測可用節點少於 5 個，停止更新，保護舊訂閱。"
               )
-
           PY
 
 
       # ============================================================
-      # 10. 建立優選 Clash
+      # 9. 建立優選 Clash
       # ============================================================
       - name: Build optimized Clash
         run: |
@@ -582,16 +546,14 @@ jobs:
           ):
 
               if proxy.get("name") in wanted:
-
                   proxies.append(proxy)
 
-          if len(proxies) < 5:
-
+          if not proxies:
               raise SystemExit(
-                  "優選後節點少於 5 個"
+                  "優選後沒有節點"
               )
 
-          optimized = {
+          result = {
               "proxies": proxies
           }
 
@@ -602,7 +564,7 @@ jobs:
           ) as f:
 
               yaml.safe_dump(
-                  optimized,
+                  result,
                   f,
                   allow_unicode=True,
                   sort_keys=False
@@ -616,73 +578,53 @@ jobs:
 
 
       # ============================================================
-      # 11. 轉回 Shadowrocket / V2Ray 訂閱
+      # 10. 優選 Clash → Shadowrocket
+      #
+      # 同樣使用文件，不再建立超長 URL。
       # ============================================================
       - name: Build Shadowrocket subscription
         run: |
           set -e
 
-          python3 - <<'PY'
-          import urllib.parse
-          import os
-
-          path = os.path.abspath(
-              "optimized.yaml"
-          )
-
-          encoded = urllib.parse.quote(
-              path,
-              safe=""
-          )
-
-          with open(
-              "optimized_path.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              f.write(encoded)
-
-          print(
-              "優選文件：",
-              path
-          )
-          PY
-
-          URL=$(cat optimized_path.txt)
+          echo "開始生成 Shadowrocket 訂閱"
 
           curl -fsS \
             --max-time 180 \
-            "http://127.0.0.1:25500/sub?target=v2ray&url=${URL}&emoji=false" \
+            "http://127.0.0.1:25500/sub?target=v2ray&url=file:///workspace/optimized.yaml&emoji=false" \
             -o sub.txt
 
           if [ ! -s sub.txt ]; then
-
             echo "Shadowrocket 訂閱生成失敗"
-
             exit 1
-
           fi
+
+          FINAL=$(grep -cve '^[[:space:]]*$' sub.txt || true)
 
           echo
           echo "================================"
-          echo "訂閱生成成功"
+          echo "Shadowrocket 訂閱完成"
           echo "================================"
 
-          wc -l sub.txt
+          echo "最終節點：$FINAL"
 
-          head -n 2 sub.txt
+          if [ "$FINAL" -lt 5 ]; then
+            echo "最終訂閱少於 5 個節點"
+            exit 1
+          fi
 
 
       # ============================================================
-      # 12. 生成最後更新狀態
+      # 11. 建立更新報告
       # ============================================================
-      - name: Build status
+      - name: Build report
         run: |
           set -e
 
-          UTC_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          HK_TIME=$(TZ=Asia/Hong_Kong date '+%Y-%m-%d %H:%M:%S GMT+8')
+          TOTAL=$(grep -Ec \
+            '^(vmess|vless|trojan|ss|hysteria2|hysteria)://' \
+            all-nodes.txt || true)
+
+          UNIQUE=$(wc -l < unique-nodes.txt)
 
           TESTED=$(python3 - <<'PY'
           import json
@@ -692,27 +634,53 @@ jobs:
               "r",
               encoding="utf-8"
           ) as f:
-
               print(len(json.load(f)))
           PY
           )
 
-          FINAL=$(wc -l < sub.txt)
+          FINAL=$(grep -cve '^[[:space:]]*$' sub.txt || true)
 
-          cat > last_update.txt <<EOF
-          status=success
-          utc=$UTC_TIME
-          local=$HK_TIME
-          tested=$TESTED
-          final=$FINAL
-          interval=8h
+          cat > daily-report.md <<EOF
+          # Daily Node Update
+
+          檢測時間：$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          - 更新週期：每 8 小時
+          - 原始抓取節點：$TOTAL
+          - 去重後：$UNIQUE
+          - 實測可用：$TESTED
+          - 最終優選：$FINAL
+
+          ## 優選方式
+
+          使用 mihomo 對節點逐一進行實際延遲測試。
+
+          測試地址：
+
+          https://www.gstatic.com/generate_204
+
+          按實際延遲由低到高排序。
+
+          最多保留 100 個可用節點。
+
+          本次更新成功後覆蓋 sub.txt。
+
+          ## Shadowrocket 訂閱地址
+
+          https://twit2er.github.io/daily-node-updater/sub.txt
           EOF
 
-          cat last_update.txt
+          cat daily-report.md
 
 
       # ============================================================
-      # 13. 保存新的訂閱
+      # 12. 保存新的訂閱
+      #
+      # 注意：
+      # 這裡不再發郵件。
+      # 也不再發 Telegram。
+      #
+      # GitHub Actions 每 8 小時只負責更新訂閱文件。
       # ============================================================
       - name: Save subscription
         run: |
@@ -726,7 +694,7 @@ jobs:
 
           git add \
             sub.txt \
-            last_update.txt
+            daily-report.md
 
           if git diff --cached --quiet; then
 
@@ -735,13 +703,25 @@ jobs:
           else
 
             git commit \
-              -m "Auto optimize nodes"
+              -m "Update optimized node subscription"
 
             git push
 
           fi
 
-          echo
+
+      # ============================================================
+      # 13. 完成
+      # ============================================================
+      - name: Done
+        if: success()
+        run: |
           echo "================================"
           echo "8 小時節點優選更新完成"
           echo "================================"
+
+          echo "訂閱文件：sub.txt"
+
+          echo "GitHub Pages："
+          echo "https://twit2er.github.io/daily-node-updater/sub.txt"
+```
