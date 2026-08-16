@@ -26,6 +26,41 @@ jobs:
           echo "## 来源" >> daily-report.md
           cat sources.txt >> daily-report.md
 
+      - name: Send email
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import urllib.request
+
+          data = {
+              "from": "Daily Update <onboarding@resend.dev>",
+              "to": ["openmysee@gmail.com"],
+              "subject": "Daily Update 每日更新",
+              "html": """
+              <h2>Daily Update</h2>
+              <p>GitHub Actions 已经成功运行。</p>
+              <p>今天的自动更新任务已经完成。</p>
+              """
+          }
+
+          req = urllib.request.Request(
+              "https://api.resend.com/emails",
+              data=json.dumps(data).encode("utf-8"),
+              headers={
+                  "Authorization": "Bearer " + os.environ["RESEND_API_KEY"],
+                  "Content-Type": "application/json"
+              },
+              method="POST"
+          )
+
+          with urllib.request.urlopen(req) as response:
+              print(response.read().decode())
+
+          PY
+
       - name: Save report
         run: |
           git config user.name "github-actions[bot]"
