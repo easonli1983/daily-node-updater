@@ -1,15 +1,20 @@
-# Daily Update
+# Daily Node Update
 
-检查时间（UTC）：2026-08-16 13:05:38
+更新时间：2026-08-16 19:34:33 UTC
 
-## 2dust/v2rayN
-- 最新版本：7.24.4
-- 发布时间：2026-07-30T12:45:22Z
-- 标题：
-- 地址：https://github.com/2dust/v2rayN/releases/tag/7.24.4
+来源数量：8
 
-## MetaCubeX/mihomo
-- 最新版本：v1.19.30
-- 发布时间：2026-08-16T10:11:34Z
-- 标题：v1.19.30
-- 地址：https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.30
+成功来源：4
+
+失败来源：0
+
+抓取节点：5872
+
+去重后：5872
+
+有效节点：5872
+
+最终订阅：100 个节点
+
+订阅地址：
+https://twit2er.github.io/daily-node-updater/sub.txt
