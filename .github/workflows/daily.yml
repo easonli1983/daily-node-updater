@@ -16,17 +16,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Get GitHub releases
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Check GitHub releases
         run: |
           python - <<'PY'
           import json
           import os
           import urllib.request
-          from datetime import datetime, timezone
 
           sources_file = "sources.txt"
+          state_file = "release-state.json"
           report_file = "daily-report.md"
 
           sources = []
@@ -37,13 +35,14 @@ jobs:
                   if line and not line.startswith("#"):
                       sources.append(line)
 
-          now = datetime.now(timezone.utc)
+          if os.path.exists(state_file):
+              with open(state_file, "r", encoding="utf-8") as f:
+                  state = json.load(f)
+          else:
+              state = {}
 
-          report = []
-          report.append("# Daily Update")
-          report.append("")
-          report.append(f"检查时间（UTC）：{now.strftime('%Y-%m-%d %H:%M:%S')}")
-          report.append("")
+          updates = []
+          new_state = dict(state)
 
           for repo in sources:
               url = f"https://api.github.com/repos/{repo}/releases/latest"
@@ -60,36 +59,71 @@ jobs:
                   with urllib.request.urlopen(req, timeout=20) as response:
                       data = json.loads(response.read().decode("utf-8"))
 
-                  tag = data.get("tag_name", "无")
-                  name = data.get("name", "无标题")
-                  published = data.get("published_at", "未知")
+                  tag = data.get("tag_name", "")
+                  name = data.get("name", "")
+                  published = data.get("published_at", "")
                   html_url = data.get(
                       "html_url",
                       f"https://github.com/{repo}/releases"
                   )
 
-                  report.append(f"## {repo}")
-                  report.append(f"- 最新版本：{tag}")
-                  report.append(f"- 发布时间：{published}")
-                  report.append(f"- 标题：{name}")
-                  report.append(f"- 地址：{html_url}")
-                  report.append("")
+                  old_tag = state.get(repo)
+
+                  if old_tag is None:
+                      new_state[repo] = tag
+                      continue
+
+                  if tag != old_tag:
+                      updates.append({
+                          "repo": repo,
+                          "old": old_tag,
+                          "new": tag,
+                          "name": name,
+                          "published": published,
+                          "url": html_url
+                      })
+                      new_state[repo] = tag
 
               except Exception as e:
-                  report.append(f"## {repo}")
-                  report.append(f"- 检查失败：{e}")
+                  print(f"检查 {repo} 失败：{e}")
+
+          with open(state_file, "w", encoding="utf-8") as f:
+              json.dump(new_state, f, ensure_ascii=False, indent=2)
+
+          if updates:
+              report = ["# GitHub 新版本更新", ""]
+
+              for item in updates:
+                  report.append(f"## {item['repo']}")
+                  report.append(f"- 原版本：{item['old']}")
+                  report.append(f"- 新版本：{item['new']}")
+                  report.append(f"- 标题：{item['name']}")
+                  report.append(f"- 发布时间：{item['published']}")
+                  report.append(f"- Release：{item['url']}")
                   report.append("")
 
-          with open(report_file, "w", encoding="utf-8") as f:
-              f.write("\n".join(report))
+              with open(report_file, "w", encoding="utf-8") as f:
+                  f.write("\n".join(report))
 
-          print("\n".join(report))
+              print("发现新版本，需要发送邮件。")
+              print("\n".join(report))
+
+              with open("send-email.txt", "w", encoding="utf-8") as f:
+                  f.write("yes")
+          else:
+              print("没有发现新版本，不发送邮件。")
+
+              with open("send-email.txt", "w", encoding="utf-8") as f:
+                  f.write("no")
           PY
 
-      - name: Send email
-        env:
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      - name: Send email if there is an update
         run: |
+          if [ "$(cat send-email.txt)" != "yes" ]; then
+            echo "没有新版本，不发送邮件。"
+            exit 0
+          fi
+
           python - <<'PY'
           import os
           import json
@@ -103,9 +137,9 @@ jobs:
           data = {
               "from": "Daily Update <onboarding@resend.dev>",
               "to": ["openmysee@gmail.com"],
-              "subject": "Daily Update｜GitHub 更新检查",
+              "subject": "Daily Update｜发现新版本",
               "html": f"""
-              <h2>GitHub 每日更新</h2>
+              <h2>GitHub 有新版本</h2>
               <p>{html}</p>
               """
           }
@@ -124,11 +158,13 @@ jobs:
           with urllib.request.urlopen(req) as response:
               print(response.read().decode("utf-8"))
           PY
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
 
-      - name: Save report
+      - name: Save state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add daily-report.md
-          git diff --cached --quiet || git commit -m "Update daily report"
+          git add release-state.json
+          git diff --cached --quiet || git commit -m "Update release state"
           git push
