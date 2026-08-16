@@ -2,7 +2,7 @@ name: Daily Node Update
 
 on:
   schedule:
-    - cron: "0 */8 * * *"
+    - cron: "0 0,8,16 * * *"
   workflow_dispatch:
 
 permissions:
@@ -13,18 +13,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Collect and build subscription
+      - name: Fetch and build subscription
         run: |
           python - <<'PY'
           import base64
-          import json
+          import os
           import re
-          import time
           import urllib.request
+          import urllib.error
+
+          OUTPUT_FILE = "sub.txt"
+          REPORT_FILE = "daily-report.md"
 
           SOURCES = [
               "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt",
@@ -34,408 +36,152 @@ jobs:
               "https://cdn.jsdelivr.net/gh/vxiaov/free_proxies@main/clash/clash.provider.yaml",
               "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub",
               "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.yml",
-              "https://raw.githubusercontent.com/ts-sf/fly/main/clash",
+              "https://raw.githubusercontent.com/ts-sf/fly/main/clash"
           ]
-
-          MAX_NODES = 100
-
-          PREFIXES = (
-              "vmess://",
-              "vless://",
-              "trojan://",
-              "ss://",
-              "ssr://",
-              "hysteria://",
-              "hysteria2://",
-              "hy2://",
-          )
-
-          def fetch_source(url):
-
-              try:
-
-                  request = urllib.request.Request(
-                      url,
-                      headers={
-                          "User-Agent":
-                              "Mozilla/5.0 "
-                              "(Windows NT 10.0; Win64; x64) "
-                              "AppleWebKit/537.36 "
-                              "Chrome/131.0 Safari/537.36",
-                          "Accept":
-                              "*/*"
-                      }
-                  )
-
-                  with urllib.request.urlopen(
-                      request,
-                      timeout=20
-                  ) as response:
-
-                      return response.read()
-
-              except Exception as e:
-
-                  print("")
-                  print("⚠️ 源访问失败，跳过：")
-                  print(url)
-                  print("原因：", str(e))
-                  print("")
-
-                  return b""
-
-          def decode_base64(text):
-
-              try:
-
-                  compact = re.sub(
-                      r"\s+",
-                      "",
-                      text
-                  )
-
-                  if len(compact) < 20:
-                      return text
-
-                  padded = compact + "=" * (
-                      -len(compact) % 4
-                  )
-
-                  decoded = base64.b64decode(
-                      padded,
-                      validate=False
-                  ).decode(
-                      "utf-8",
-                      errors="ignore"
-                  )
-
-                  if any(
-                      prefix in decoded
-                      for prefix in PREFIXES
-                  ):
-                      return decoded
-
-              except Exception:
-                  pass
-
-              return text
-
-          def extract_nodes(text):
-
-              text = decode_base64(text)
-
-              result = []
-
-              for line in text.splitlines():
-
-                  line = line.strip()
-
-                  if line.startswith(PREFIXES):
-
-                      result.append(line)
-
-              return result
 
           print("================================")
           print("开始获取节点")
           print("================================")
 
           all_nodes = []
-
           success_sources = 0
           failed_sources = 0
 
-          for source in SOURCES:
+          def fetch(url):
+              req = urllib.request.Request(
+                  url,
+                  headers={
+                      "User-Agent": "Mozilla/5.0",
+                      "Accept": "*/*"
+                  }
+              )
 
-              print("")
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  return response.read().decode("utf-8", errors="ignore")
+
+          def extract_nodes(text):
+              nodes = []
+
+              # Base64 订阅
+              compact = re.sub(r"\s+", "", text)
+
+              try:
+                  decoded = base64.b64decode(
+                      compact + "=" * (-len(compact) % 4),
+                      validate=False
+                  ).decode("utf-8", errors="ignore")
+
+                  if (
+                      "vmess://" in decoded
+                      or "vless://" in decoded
+                      or "trojan://" in decoded
+                      or "ss://" in decoded
+                      or "hysteria" in decoded
+                  ):
+                      text = decoded
+              except Exception:
+                  pass
+
+              patterns = [
+                  r"vmess://[^\s<>'\"]+",
+                  r"vless://[^\s<>'\"]+",
+                  r"trojan://[^\s<>'\"]+",
+                  r"ss://[^\s<>'\"]+",
+                  r"hysteria2://[^\s<>'\"]+",
+                  r"hysteria://[^\s<>'\"]+"
+              ]
+
+              for pattern in patterns:
+                  nodes.extend(re.findall(pattern, text))
+
+              return nodes
+
+          for source in SOURCES:
+              print()
               print("正在获取：")
               print(source)
 
-              raw = fetch_source(source)
+              try:
+                  content = fetch(source)
+                  nodes = extract_nodes(content)
 
-              if not raw:
+                  if nodes:
+                      print("✅ 获取成功：", len(nodes), "个节点")
+                      all_nodes.extend(nodes)
+                      success_sources += 1
+                  else:
+                      print("⚠️ 获取成功，但没有识别到节点")
 
+              except Exception as e:
+                  print("❌ 获取失败：", str(e))
                   failed_sources += 1
-                  continue
 
-              text = raw.decode(
-                  "utf-8",
-                  errors="ignore"
-              )
-
-              nodes = extract_nodes(text)
-
-              if nodes:
-
-                  success_sources += 1
-
-                  print(
-                      "✅ 获取成功：",
-                      len(nodes),
-                      "个节点"
-                  )
-
-                  all_nodes.extend(nodes)
-
-              else:
-
-                  print(
-                      "⚠️ 获取成功，但没有识别到节点"
-                  )
-
-          print("")
+          print()
           print("================================")
           print("源统计")
           print("================================")
+          print("总来源：", len(SOURCES))
+          print("成功来源：", success_sources)
+          print("失败来源：", failed_sources)
+          print("抓取节点：", len(all_nodes))
 
-          print(
-              "总来源：",
-              len(SOURCES)
-          )
-
-          print(
-              "成功来源：",
-              success_sources
-          )
-
-          print(
-              "失败来源：",
-              failed_sources
-          )
-
-          print(
-              "抓取节点：",
-              len(all_nodes)
-          )
-
-          # ==========================
           # 去重
-          # ==========================
-
           unique_nodes = []
           seen = set()
 
           for node in all_nodes:
-
               node = node.strip()
 
               if not node:
                   continue
 
-              if node in seen:
-                  continue
+              if node not in seen:
+                  seen.add(node)
+                  unique_nodes.append(node)
 
-              seen.add(node)
-              unique_nodes.append(node)
+          print("去重后节点：", len(unique_nodes))
 
-          print(
-              "去重后节点：",
-              len(unique_nodes)
-          )
+          # 暂时最多保留 100 个
+          final_nodes = unique_nodes[:100]
 
-          # ==========================
-          # 基础有效性检查
-          # ==========================
+          print("最终节点数量：", len(final_nodes))
 
-          valid_nodes = []
+          with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+              for node in final_nodes:
+                  f.write(node + "\n")
 
-          for node in unique_nodes:
+          report = f"""# Daily Node Update
 
-              if not node.startswith(
-                  PREFIXES
-              ):
-                  continue
+          ## 节点更新结果
 
-              # 去掉明显异常的超长内容
-              if len(node) > 5000:
-                  continue
+          - 来源数量：{len(SOURCES)}
+          - 成功来源：{success_sources}
+          - 失败来源：{failed_sources}
+          - 抓取节点：{len(all_nodes)}
+          - 去重后节点：{len(unique_nodes)}
+          - 最终节点：{len(final_nodes)}
 
-              valid_nodes.append(node)
+          订阅地址：
 
-          print(
-              "基础有效节点：",
-              len(valid_nodes)
-          )
+          https://twit2er.github.io/daily-node-updater/sub.txt
+          """
 
-          # ==========================
-          # 最终最多保留100个
-          # ==========================
-
-          final_nodes = valid_nodes[
-              :MAX_NODES
-          ]
-
-          print("")
-          print("================================")
-          print("最终结果")
-          print("================================")
-
-          print(
-              "最终节点数量：",
-              len(final_nodes)
-          )
-
-          # ==========================
-          # 如果没有节点
-          # ==========================
-
-          if len(final_nodes) == 0:
-
-              print("")
-              print(
-                  "❌ 没有获得任何有效节点。"
-              )
-
-              # 不覆盖原来的有效订阅
-              # 让本次 Actions 正常结束
-              # 避免因为某个源临时故障导致
-              # 你的订阅变成空文件。
-
-              with open(
-                  "daily-report.md",
-                  "w",
-                  encoding="utf-8"
-              ) as f:
-
-                  f.write(
-                      "# Daily Node Update\n\n"
-                      "⚠️ 本次没有获取到有效节点。\n\n"
-                      "原订阅文件保持不变。\n"
-                  )
-
-              with open(
-                  "send-email.txt",
-                  "w",
-                  encoding="utf-8"
-              ) as f:
-
-                  f.write("no")
-
-              raise SystemExit(0)
-
-          # ==========================
-          # 写入 nodes.txt
-          # ==========================
-
-          plain_text = "\n".join(
-              final_nodes
-          )
-
-          with open(
-              "public/nodes.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              f.write(
-                  plain_text
-              )
-
-              f.write("\n")
-
-          # ==========================
-          # Base64 订阅
-          # ==========================
-
-          encoded = base64.b64encode(
-              plain_text.encode("utf-8")
-          ).decode("utf-8")
-
-          with open(
-              "public/sub.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              f.write(encoded)
-              f.write("\n")
-
-          # ==========================
-          # 生成报告
-          # ==========================
-
-          current_time = time.strftime(
-              "%Y-%m-%d %H:%M:%S UTC"
-          )
-
-          report = (
-              "# Daily Node Update\n\n"
-              f"更新时间：{current_time}\n\n"
-              f"来源数量：{len(SOURCES)}\n\n"
-              f"成功来源：{success_sources}\n\n"
-              f"失败来源：{failed_sources}\n\n"
-              f"抓取节点：{len(all_nodes)}\n\n"
-              f"去重后：{len(unique_nodes)}\n\n"
-              f"有效节点：{len(valid_nodes)}\n\n"
-              f"最终订阅：{len(final_nodes)} 个节点\n\n"
-              "订阅地址：\n"
-              "https://twit2er.github.io/daily-node-updater/sub.txt\n"
-          )
-
-          with open(
-              "daily-report.md",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
+          with open(REPORT_FILE, "w", encoding="utf-8") as f:
               f.write(report)
 
-          with open(
-              "node-stats.json",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              json.dump(
-                  {
-                      "sources":
-                          len(SOURCES),
-                      "success_sources":
-                          success_sources,
-                      "failed_sources":
-                          failed_sources,
-                      "fetched":
-                          len(all_nodes),
-                      "unique":
-                          len(unique_nodes),
-                      "valid":
-                          len(valid_nodes),
-                      "final":
-                          len(final_nodes),
-                      "updated_at":
-                          current_time
-                  },
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
-
-          # 通知邮件步骤
-          with open(
-              "send-email.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              f.write("yes")
-
-          print("")
-          print(report)
-
+          print()
+          print("================================")
+          print("生成完成")
+          print("================================")
+          print("订阅地址：")
+          print("https://twit2er.github.io/daily-node-updater/sub.txt")
           PY
 
-      - name: Send subscription email
-        if: success()
+      - name: Send email
         run: |
-          if [ "$(cat send-email.txt)" != "yes" ]; then
-            echo "没有有效节点，本次不发送邮件。"
-            exit 0
-          fi
-
           python - <<'PY'
-          import os
           import json
-          import base64
+          import os
           import urllib.request
 
           with open(
@@ -443,117 +189,74 @@ jobs:
               "r",
               encoding="utf-8"
           ) as f:
-
               report = f.read()
 
           with open(
-              "public/sub.txt",
-              "rb"
+              "sub.txt",
+              "r",
+              encoding="utf-8"
           ) as f:
+              subscription = f.read()
 
-              attachment = base64.b64encode(
-                  f.read()
-              ).decode("utf-8")
+          html_report = report.replace("\n", "<br>")
+
+          html = f"""
+          <h2>Daily Node Update</h2>
+
+          <p>{html_report}</p>
+
+          <hr>
+
+          <h3>Shadowrocket 订阅地址</h3>
+
+          <p>
+          <a href="https://twit2er.github.io/daily-node-updater/sub.txt">
+          https://twit2er.github.io/daily-node-updater/sub.txt
+          </a>
+          </p>
+
+          <p>最终节点数量：{len(subscription.splitlines())}</p>
+          """
 
           data = {
-
-              "from":
-                  "Daily Node Update <onboarding@resend.dev>",
-
-              "to": [
-                  "easonli1983@gmail.com"
-              ],
-
-              "subject":
-                  "Daily Node Update｜最新节点订阅",
-
-              "html":
-                  "<h2>🟢 Daily Node Update</h2>"
-                  "<pre>"
-                  + report
-                  + "</pre>"
-                  "<p>最新100个节点订阅已生成。</p>"
-                  "<p>附件：sub.txt</p>",
-
-              "attachments": [
-                  {
-                      "filename":
-                          "sub.txt",
-
-                      "content":
-                          attachment
-                  }
-              ]
+              "from": "Daily Update <onboarding@resend.dev>",
+              "to": [os.environ["EMAIL"]],
+              "subject": "Daily Update｜节点订阅更新",
+              "html": html
           }
 
-          request = urllib.request.Request(
-
+          req = urllib.request.Request(
               "https://api.resend.com/emails",
-
-              data=json.dumps(
-                  data
-              ).encode("utf-8"),
-
+              data=json.dumps(data).encode("utf-8"),
               headers={
-
                   "Authorization":
-                      "Bearer "
-                      + os.environ[
-                          "RESEND_API_KEY"
-                      ],
-
+                      "Bearer " + os.environ["RESEND_API_KEY"],
                   "Content-Type":
-                      "application/json"
+                      "application/json",
+                  "User-Agent":
+                      "daily-node-updater/1.0"
               },
-
               method="POST"
           )
 
-          try:
-
-              with urllib.request.urlopen(
-                  request,
-                  timeout=30
-              ) as response:
-
-                  print(
-                      "📧 邮件发送成功："
-                  )
-
-                  print(
-                      response.read().decode(
-                          "utf-8"
-                      )
-                  )
-
-          except Exception as e:
-
-              print(
-                  "⚠️ 邮件发送失败：",
-                  str(e)
-              )
-
-              # 邮件失败不让整个节点更新任务失败
-              # 节点文件仍然正常更新
-
+          with urllib.request.urlopen(req, timeout=30) as response:
+              result = response.read().decode("utf-8")
+              print("📧 邮件发送成功")
+              print(result)
           PY
 
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL: ${{ secrets.EMAIL }}
 
       - name: Save subscription
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add public/sub.txt
-          git add public/nodes.txt
-          git add daily-report.md
-          git add node-stats.json
+          git add sub.txt daily-report.md
 
-          if git diff --cached --quiet; then
-            echo "没有新的文件变化。"
-          else
+          git diff --cached --quiet || \
             git commit -m "Update node subscription"
-            git push
-          fi
+
+          git push
