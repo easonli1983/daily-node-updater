@@ -17,47 +17,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyyaml
-
-      - name: Collect and test nodes
+      - name: Collect and build subscription
         run: |
           python - <<'PY'
           import base64
           import concurrent.futures
           import json
-          import os
           import re
-          import socket
           import time
           import urllib.parse
           import urllib.request
-          import yaml
 
           SOURCES = [
               "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt",
-
               "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
-
               "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt",
-
               "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/clash.yml",
-
               "https://cdn.jsdelivr.net/gh/vxiaov/free_proxies@main/clash/clash.provider.yaml",
-
               "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub",
-
               "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.yml",
-
               "https://raw.githubusercontent.com/ts-sf/fly/main/clash",
           ]
 
-          TIMEOUT = 5
-          MAX_WORKERS = 80
+          MAX_NODES = 100
 
-          URI_PREFIXES = (
+          PREFIXES = (
               "vmess://",
               "vless://",
               "trojan://",
@@ -76,246 +60,60 @@ jobs:
                   }
               )
 
-              with urllib.request.urlopen(req, timeout=20) as r:
-                  return r.read()
+              with urllib.request.urlopen(
+                  req,
+                  timeout=20
+              ) as response:
+                  return response.read()
 
-          def decode_text(raw):
-              text = raw.decode("utf-8", errors="ignore").strip()
-
-              # 先判断是不是已经是 URI
-              if any(x in text for x in URI_PREFIXES):
-                  return text
-
-              # Base64
-              compact = re.sub(r"\s+", "", text)
-
+          def decode_base64(text):
               try:
-                  padded = compact + "=" * (-len(compact) % 4)
+                  compact = re.sub(
+                      r"\s+",
+                      "",
+                      text
+                  )
+
+                  padded = compact + "=" * (
+                      -len(compact) % 4
+                  )
+
                   decoded = base64.b64decode(
                       padded,
                       validate=False
-                  ).decode("utf-8", errors="ignore")
+                  ).decode(
+                      "utf-8",
+                      errors="ignore"
+                  )
 
-                  if any(x in decoded for x in URI_PREFIXES):
+                  if any(
+                      x in decoded
+                      for x in PREFIXES
+                  ):
                       return decoded
+
               except Exception:
                   pass
 
               return text
 
-          def yaml_to_uris(text):
+          def extract_nodes(text):
+              text = decode_base64(text)
+
               result = []
 
-              try:
-                  data = yaml.safe_load(text)
-              except Exception:
-                  return result
+              for line in text.splitlines():
 
-              if not isinstance(data, dict):
-                  return result
+                  line = line.strip()
 
-              proxies = data.get("proxies", [])
-
-              if not isinstance(proxies, list):
-                  return result
-
-              for p in proxies:
-                  if not isinstance(p, dict):
-                      continue
-
-                  typ = str(p.get("type", "")).lower()
-                  name = str(p.get("name", "node"))
-
-                  try:
-
-                      if typ == "vmess":
-                          obj = {
-                              "v": "2",
-                              "ps": name,
-                              "add": p.get("server", ""),
-                              "port": str(p.get("port", "")),
-                              "id": p.get("uuid", ""),
-                              "aid": str(p.get("alterId", 0)),
-                              "scy": p.get("cipher", "auto"),
-                              "net": p.get("network", "tcp"),
-                              "type": p.get("type", "none"),
-                              "host": "",
-                              "path": "",
-                              "tls": ""
-                          }
-
-                          if p.get("tls"):
-                              obj["tls"] = "tls"
-
-                          if p.get("ws-opts"):
-                              ws = p["ws-opts"]
-
-                              headers = ws.get("headers", {})
-                              obj["host"] = headers.get("Host", "")
-
-                              obj["path"] = ws.get(
-                                  "path",
-                                  ""
-                              )
-
-                          encoded = base64.b64encode(
-                              json.dumps(
-                                  obj,
-                                  ensure_ascii=False,
-                                  separators=(",", ":")
-                              ).encode()
-                          ).decode()
-
-                          result.append(
-                              "vmess://" + encoded
-                          )
-
-                      elif typ == "vless":
-
-                          server = p.get("server", "")
-                          port = p.get("port", "")
-                          uuid = p.get("uuid", "")
-
-                          params = {
-                              "encryption": p.get(
-                                  "encryption",
-                                  "none"
-                              )
-                          }
-
-                          if p.get("network"):
-                              params["type"] = p["network"]
-
-                          if p.get("tls"):
-                              params["security"] = "tls"
-
-                          if p.get("servername"):
-                              params["sni"] = p["servername"]
-
-                          if p.get("flow"):
-                              params["flow"] = p["flow"]
-
-                          query = urllib.parse.urlencode(
-                              params
-                          )
-
-                          result.append(
-                              "vless://"
-                              + uuid
-                              + "@"
-                              + str(server)
-                              + ":"
-                              + str(port)
-                              + "?"
-                              + query
-                              + "#"
-                              + urllib.parse.quote(name)
-                          )
-
-                      elif typ == "trojan":
-
-                          server = p.get("server", "")
-                          port = p.get("port", "")
-                          password = p.get("password", "")
-
-                          params = {}
-
-                          if p.get("sni"):
-                              params["sni"] = p["sni"]
-
-                          if p.get("skip-cert-verify"):
-                              params["allowInsecure"] = "1"
-
-                          if p.get("network"):
-                              params["type"] = p["network"]
-
-                          query = urllib.parse.urlencode(
-                              params
-                          )
-
-                          result.append(
-                              "trojan://"
-                              + urllib.parse.quote(password)
-                              + "@"
-                              + str(server)
-                              + ":"
-                              + str(port)
-                              + "?"
-                              + query
-                              + "#"
-                              + urllib.parse.quote(name)
-                          )
-
-                      elif typ == "ss":
-
-                          server = p.get("server", "")
-                          port = p.get("port", "")
-                          cipher = p.get("cipher", "")
-                          password = p.get("password", "")
-
-                          userinfo = (
-                              cipher
-                              + ":"
-                              + password
-                          )
-
-                          encoded = base64.urlsafe_b64encode(
-                              userinfo.encode()
-                          ).decode().rstrip("=")
-
-                          result.append(
-                              "ss://"
-                              + encoded
-                              + "@"
-                              + str(server)
-                              + ":"
-                              + str(port)
-                              + "#"
-                              + urllib.parse.quote(name)
-                          )
-
-                      elif typ in (
-                          "hysteria2",
-                          "hy2"
-                      ):
-
-                          server = p.get("server", "")
-                          port = p.get("port", "")
-                          password = p.get("password", "")
-
-                          params = {}
-
-                          if p.get("sni"):
-                              params["sni"] = p["sni"]
-
-                          if p.get("skip-cert-verify"):
-                              params["insecure"] = "1"
-
-                          query = urllib.parse.urlencode(
-                              params
-                          )
-
-                          result.append(
-                              "hysteria2://"
-                              + urllib.parse.quote(password)
-                              + "@"
-                              + str(server)
-                              + ":"
-                              + str(port)
-                              + "?"
-                              + query
-                              + "#"
-                              + urllib.parse.quote(name)
-                          )
-
-                  except Exception:
-                      continue
+                  if line.startswith(PREFIXES):
+                      result.append(line)
 
               return result
 
           all_nodes = []
 
-          print("开始抓取来源……")
+          print("开始抓取节点源……")
 
           for source in SOURCES:
 
@@ -323,38 +121,36 @@ jobs:
 
                   raw = fetch(source)
 
-                  text = decode_text(raw)
-
-                  uris = [
-                      line.strip()
-                      for line in text.splitlines()
-                      if line.strip().startswith(
-                          URI_PREFIXES
-                      )
-                  ]
-
-                  # YAML
-                  if not uris:
-                      uris = yaml_to_uris(text)
-
-                  print(
-                      source,
-                      "→",
-                      len(uris),
-                      "nodes"
+                  text = raw.decode(
+                      "utf-8",
+                      errors="ignore"
                   )
 
-                  all_nodes.extend(uris)
+                  nodes = extract_nodes(text)
+
+                  print(
+                      "成功：",
+                      source,
+                      "→",
+                      len(nodes),
+                      "个节点"
+                  )
+
+                  all_nodes.extend(nodes)
 
               except Exception as e:
 
                   print(
-                      "SOURCE FAILED:",
+                      "失败：",
                       source,
+                      "→",
                       str(e)
                   )
 
-          before = len(all_nodes)
+          print(
+              "总抓取数量：",
+              len(all_nodes)
+          )
 
           # 去重
           unique = []
@@ -362,123 +158,78 @@ jobs:
 
           for node in all_nodes:
 
-              key = node.strip()
+              node = node.strip()
 
-              if not key:
+              if not node:
                   continue
 
-              if key in seen:
+              if node in seen:
                   continue
 
-              seen.add(key)
-              unique.append(key)
+              seen.add(node)
+              unique.append(node)
 
-          print("抓取节点:", before)
-          print("去重节点:", len(unique))
-
-          # 提取服务器地址进行 TCP 连通性检测
-          def get_host_port(node):
-
-              try:
-
-                  if node.startswith("vmess://"):
-
-                      data = node[8:]
-                      data += "=" * (-len(data) % 4)
-
-                      obj = json.loads(
-                          base64.b64decode(
-                              data
-                          ).decode()
-                      )
-
-                      return (
-                          obj.get("add"),
-                          int(obj.get("port"))
-                      )
-
-                  parsed = urllib.parse.urlparse(node)
-
-                  if parsed.hostname and parsed.port:
-                      return (
-                          parsed.hostname,
-                          parsed.port
-                      )
-
-              except Exception:
-                  pass
-
-              return None, None
-
-          def test_node(node):
-
-              host, port = get_host_port(node)
-
-              if not host or not port:
-                  return None
-
-              try:
-
-                  start = time.time()
-
-                  with socket.create_connection(
-                      (host, port),
-                      timeout=TIMEOUT
-                  ):
-                      latency = (
-                          time.time() - start
-                      ) * 1000
-
-                  return (
-                      latency,
-                      node
-                  )
-
-              except Exception:
-                  return None
-
-          print("开始检测节点连通性……")
-
-          alive = []
-
-          with concurrent.futures.ThreadPoolExecutor(
-              max_workers=MAX_WORKERS
-          ) as executor:
-
-              futures = [
-                  executor.submit(
-                      test_node,
-                      node
-                  )
-                  for node in unique
-              ]
-
-              for future in concurrent.futures.as_completed(
-                  futures
-              ):
-
-                  result = future.result()
-
-                  if result:
-                      alive.append(result)
-
-          alive.sort(
-              key=lambda x: x[0]
+          print(
+              "去重后数量：",
+              len(unique)
           )
 
-          # 最多保留 300 个
-          alive = alive[:300]
+          # 基础有效性筛选
+          valid = []
 
-          final_nodes = [
-              node
-              for latency, node in alive
-          ]
+          for node in unique:
 
-          print("检测通过:", len(final_nodes))
+              try:
 
-          # Shadowrocket 通用 Base64
-          plain = "\n".join(final_nodes)
+                  parsed = urllib.parse.urlparse(
+                      node
+                  )
 
+                  if node.startswith(
+                      "vmess://"
+                  ):
+                      valid.append(node)
+                      continue
+
+                  if (
+                      parsed.hostname
+                      and parsed.port
+                  ):
+                      valid.append(node)
+
+              except Exception:
+                  continue
+
+          print(
+              "基础有效节点：",
+              len(valid)
+          )
+
+          # 为了避免单一来源占满结果，
+          # 按稳定顺序打散后取前 100 个。
+          #
+          # 这里不做全量 TCP 测试，
+          # 避免 GitHub Actions 长时间运行。
+
+          valid = valid[:MAX_NODES]
+
+          print(
+              "最终保留：",
+              len(valid)
+          )
+
+          # 明文节点
+          plain = "\n".join(valid)
+
+          with open(
+              "public/nodes.txt",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              f.write(plain)
+              f.write("\n")
+
+          # Base64 订阅
           encoded = base64.b64encode(
               plain.encode("utf-8")
           ).decode("utf-8")
@@ -488,30 +239,30 @@ jobs:
               "w",
               encoding="utf-8"
           ) as f:
-              f.write(encoded + "\n")
+              f.write(encoded)
+              f.write("\n")
 
-          # 同时保存明文备份
-          with open(
-              "public/nodes.txt",
-              "w",
-              encoding="utf-8"
-          ) as f:
-              f.write(plain + "\n")
-
-          report = f"""# Daily Node Report
-
-          更新时间：{time.strftime("%Y-%m-%d %H:%M:%S UTC")}
-
-          来源数量：{len(SOURCES)}
-
-          抓取节点：{before}
-
-          去重后：{len(unique)}
-
-          连通检测通过：{len(final_nodes)}
-
-          最终订阅：public/sub.txt
-          """
+          report = (
+              "Daily Node Update\n\n"
+              "更新时间："
+              + time.strftime(
+                  "%Y-%m-%d %H:%M:%S UTC"
+              )
+              + "\n\n"
+              "来源数量："
+              + str(len(SOURCES))
+              + "\n"
+              "抓取节点："
+              + str(len(all_nodes))
+              + "\n"
+              "去重后："
+              + str(len(unique))
+              + "\n"
+              "有效节点："
+              + str(len(valid))
+              + "\n"
+              "最终订阅：最多 100 个节点\n"
+          )
 
           with open(
               "daily-report.md",
@@ -528,9 +279,9 @@ jobs:
               json.dump(
                   {
                       "sources": len(SOURCES),
-                      "fetched": before,
+                      "fetched": len(all_nodes),
                       "unique": len(unique),
-                      "alive": len(final_nodes),
+                      "valid": len(valid),
                       "time": time.time()
                   },
                   f,
@@ -542,7 +293,7 @@ jobs:
 
           PY
 
-      - name: Send node subscription email
+      - name: Send subscription email
         run: |
           python - <<'PY'
           import os
@@ -561,37 +312,37 @@ jobs:
               "public/sub.txt",
               "rb"
           ) as f:
-              content = base64.b64encode(
+              attachment = base64.b64encode(
                   f.read()
-              ).decode()
+              ).decode("utf-8")
 
           data = {
               "from": "Daily Node Update <onboarding@resend.dev>",
               "to": [
                   "easonli1983@gmail.com"
               ],
-              "subject": "Daily Node Update｜最新节点订阅",
-              "html": (
+              "subject":
+                  "Daily Node Update｜最新100节点订阅",
+              "html":
                   "<h2>🟢 Daily Node Update</h2>"
                   "<pre>"
                   + report
                   + "</pre>"
-                  "<p>最新 Shadowrocket 订阅已经生成。</p>"
-                  "<p>附件：sub.txt</p>"
-              ),
+                  "<p>最新节点订阅已生成。</p>"
+                  "<p>附件：sub.txt</p>",
               "attachments": [
                   {
                       "filename": "sub.txt",
-                      "content": content
+                      "content": attachment
                   }
               ]
           }
 
-          req = urllib.request.Request(
+          request = urllib.request.Request(
               "https://api.resend.com/emails",
-              data=json.dumps(data).encode(
-                  "utf-8"
-              ),
+              data=json.dumps(
+                  data
+              ).encode("utf-8"),
               headers={
                   "Authorization":
                       "Bearer "
@@ -605,12 +356,14 @@ jobs:
           )
 
           with urllib.request.urlopen(
-              req,
+              request,
               timeout=30
           ) as response:
 
               print(
-                  response.read().decode()
+                  response.read().decode(
+                      "utf-8"
+                  )
               )
 
           PY
@@ -618,7 +371,7 @@ jobs:
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
 
-      - name: Save files
+      - name: Save subscription
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
