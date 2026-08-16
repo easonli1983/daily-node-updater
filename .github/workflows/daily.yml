@@ -16,19 +16,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create daily report
+      - name: Generate report
         run: |
-          echo "Daily update started."
-          echo ""
-          echo "Date:"
-          date -u
-          echo ""
-          echo "Daily update completed." > daily-report.txt
+          echo "# Daily Update" > daily-report.md
+          echo "" >> daily-report.md
+          echo "更新时间（UTC）：" >> daily-report.md
+          date -u >> daily-report.md
+          echo "" >> daily-report.md
+          echo "## 来源" >> daily-report.md
+          cat sources.txt >> daily-report.md
 
       - name: Save report
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add daily-report.txt
+          git add daily-report.md
           git diff --cached --quiet || git commit -m "Update daily report"
           git push
