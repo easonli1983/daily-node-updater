@@ -2,7 +2,7 @@ name: Daily Update
 
 on:
   schedule:
-    - cron: "0 1 * * *"
+    - cron: "0 0,8,16 * * *"
   workflow_dispatch:
 
 permissions:
@@ -16,15 +16,75 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Generate report
+      - name: Get GitHub releases
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "# Daily Update" > daily-report.md
-          echo "" >> daily-report.md
-          echo "更新时间（UTC）：" >> daily-report.md
-          date -u >> daily-report.md
-          echo "" >> daily-report.md
-          echo "## 来源" >> daily-report.md
-          cat sources.txt >> daily-report.md
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          from datetime import datetime, timezone
+
+          sources_file = "sources.txt"
+          report_file = "daily-report.md"
+
+          sources = []
+
+          with open(sources_file, "r", encoding="utf-8") as f:
+              for line in f:
+                  line = line.strip()
+                  if line and not line.startswith("#"):
+                      sources.append(line)
+
+          now = datetime.now(timezone.utc)
+
+          report = []
+          report.append("# Daily Update")
+          report.append("")
+          report.append(f"检查时间（UTC）：{now.strftime('%Y-%m-%d %H:%M:%S')}")
+          report.append("")
+
+          for repo in sources:
+              url = f"https://api.github.com/repos/{repo}/releases/latest"
+
+              req = urllib.request.Request(
+                  url,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "daily-node-updater/1.0"
+                  }
+              )
+
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as response:
+                      data = json.loads(response.read().decode("utf-8"))
+
+                  tag = data.get("tag_name", "无")
+                  name = data.get("name", "无标题")
+                  published = data.get("published_at", "未知")
+                  html_url = data.get(
+                      "html_url",
+                      f"https://github.com/{repo}/releases"
+                  )
+
+                  report.append(f"## {repo}")
+                  report.append(f"- 最新版本：{tag}")
+                  report.append(f"- 发布时间：{published}")
+                  report.append(f"- 标题：{name}")
+                  report.append(f"- 地址：{html_url}")
+                  report.append("")
+
+              except Exception as e:
+                  report.append(f"## {repo}")
+                  report.append(f"- 检查失败：{e}")
+                  report.append("")
+
+          with open(report_file, "w", encoding="utf-8") as f:
+              f.write("\n".join(report))
+
+          print("\n".join(report))
+          PY
 
       - name: Send email
         env:
@@ -35,14 +95,18 @@ jobs:
           import json
           import urllib.request
 
+          with open("daily-report.md", "r", encoding="utf-8") as f:
+              report = f.read()
+
+          html = report.replace("\n", "<br>")
+
           data = {
               "from": "Daily Update <onboarding@resend.dev>",
-              "to": ["openmysee@gmail.com"],
-              "subject": "Daily Update 每日更新",
-              "html": """
-              <h2>Daily Update</h2>
-              <p>GitHub Actions 已经成功运行。</p>
-              <p>今天的自动更新任务已经完成。</p>
+              "to": ["你的Gmail地址"],
+              "subject": "Daily Update｜GitHub 更新检查",
+              "html": f"""
+              <h2>GitHub 每日更新</h2>
+              <p>{html}</p>
               """
           }
 
