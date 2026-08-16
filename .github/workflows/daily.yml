@@ -51,14 +51,14 @@ jobs:
               data=json.dumps(data).encode("utf-8"),
               headers={
                   "Authorization": "Bearer " + os.environ["RESEND_API_KEY"],
-                  "Content-Type": "application/json"
+                  "Content-Type": "application/json",
+                  "User-Agent": "daily-node-updater/1.0"
               },
               method="POST"
           )
 
           with urllib.request.urlopen(req) as response:
-              print(response.read().decode())
-
+              print(response.read().decode("utf-8"))
           PY
 
       - name: Save report
