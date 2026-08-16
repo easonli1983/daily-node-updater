@@ -1,4 +1,3 @@
-```yaml
 name: Node Auto Update
 
 on:
@@ -15,16 +14,9 @@ jobs:
 
     steps:
 
-      # ==========================================
-      # 1. Checkout
-      # ==========================================
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      # ==========================================
-      # 2. 抓取節點
-      # ==========================================
       - name: Fetch nodes
         shell: bash
         run: |
@@ -106,44 +98,31 @@ jobs:
 
           done
 
+          echo
+          echo "========================================"
+          echo "抓取完成"
+          echo "========================================"
 
-          # ==========================================
-          # 3. 檢查
-          # ==========================================
+          echo "來源總數：${#SOURCES[@]}"
+          echo "成功來源：$success"
+          echo "失敗來源：$failed"
+          echo "抓取節點：$total"
 
           if [ ! -s all-nodes.txt ]; then
             echo "ERROR：沒有抓到任何節點"
             exit 1
           fi
 
-
-          # ==========================================
-          # 4. 去重
-          # ==========================================
-
           sort -u all-nodes.txt > unique-nodes.txt
 
           UNIQUE=$(wc -l < unique-nodes.txt | tr -d ' ')
 
-          echo
-          echo "========================================"
-          echo "抓取完成"
-          echo "========================================"
-          echo "來源總數：${#SOURCES[@]}"
-          echo "成功來源：$success"
-          echo "失敗來源：$failed"
-          echo "抓取節點：$total"
           echo "去重節點：$UNIQUE"
 
-
-          # ==========================================
-          # 5. 建立 Shadowrocket Base64 訂閱
-          #
-          # Shadowrocket 可以直接使用
-          # Base64 編碼的 URI 訂閱。
-          #
-          # 不再使用 subconverter。
-          # ==========================================
+          if [ "$UNIQUE" -lt 1 ]; then
+            echo "ERROR：去重後沒有節點"
+            exit 1
+          fi
 
           base64 -w 0 unique-nodes.txt > sub.txt
 
@@ -154,38 +133,33 @@ jobs:
             exit 1
           fi
 
-
-          # ==========================================
-          # 6. 更新報告
-          # ==========================================
-
           NOW=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
           cat > daily-report.md <<EOF
-          # Node Auto Update
+# Node Auto Update
 
-          最後更新：$NOW
+最後更新：$NOW
 
-          更新週期：每 8 小時
+更新週期：每 8 小時
 
-          - 原始來源：${#SOURCES[@]}
-          - 成功來源：$success
-          - 失敗來源：$failed
-          - 抓取節點：$total
-          - 去重節點：$UNIQUE
+- 原始來源：${#SOURCES[@]}
+- 成功來源：$success
+- 失敗來源：$failed
+- 抓取節點：$total
+- 去重節點：$UNIQUE
 
-          訂閱地址：
+訂閱地址：
 
-          https://twit2er.github.io/daily-node-updater/sub.txt
-          EOF
+https://twit2er.github.io/daily-node-updater/sub.txt
+EOF
 
           echo
+          echo "========================================"
+          echo "更新完成"
+          echo "========================================"
+
           cat daily-report.md
 
-
-      # ==========================================
-      # 7. 保存訂閱
-      # ==========================================
       - name: Save subscription
         shell: bash
         run: |
@@ -197,14 +171,8 @@ jobs:
           git add sub.txt daily-report.md
 
           if git diff --cached --quiet; then
-
-            echo "內容沒有變化"
-
+            echo "沒有內容變化"
           else
-
             git commit -m "Auto update node subscription"
-
             git push
-
           fi
-```
