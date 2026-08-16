@@ -1,158 +1,11 @@
-name: Daily Node Update
-
-on:
-  schedule:
-    - cron: "0 0,8,16 * * *"
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-jobs:
-  update:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Fetch nodes and build subscription
-        run: |
-          set +e
-
-          rm -f all-nodes.txt sub.txt daily-report.md
-
-          SOURCES=(
-            "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt"
-            "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt"
-            "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt"
-            "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/clash.yml"
-            "https://cdn.jsdelivr.net/gh/vxiaov/free_proxies@main/clash/clash.provider.yaml"
-            "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub"
-            "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.yml"
-            "https://raw.githubusercontent.com/ts-sf/fly/main/clash"
-          )
-
-          total=0
-          success=0
-          failed=0
-          index=0
-
-          echo "================================"
-          echo "开始获取节点"
-          echo "================================"
-
-          for url in "${SOURCES[@]}"; do
-            index=$((index + 1))
-
-            echo
-            echo "[$index/${#SOURCES[@]}]"
-            echo "正在获取：$url"
-
-            tmp="source-$index.txt"
-
-            if curl -L \
-              --connect-timeout 10 \
-              --max-time 30 \
-              --retry 2 \
-              --retry-delay 2 \
-              -A "Mozilla/5.0" \
-              -sS \
-              -o "$tmp" \
-              -w "HTTP_STATUS:%{http_code}\n" \
-              "$url" > "status-$index.txt" 2>&1; then
-
-              status=$(grep "HTTP_STATUS:" "status-$index.txt" | tail -1 | cut -d: -f2)
-
-              if [ "$status" = "200" ]; then
-                echo "✅ HTTP 200"
-
-                count=$(grep -Eo \
-                  '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
-                  "$tmp" | wc -l)
-
-                if [ "$count" -gt 0 ]; then
-                  echo "✅ 识别到 $count 个节点"
-
-                  grep -Eo \
-                    '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^[:space:]<>"]+' \
-                    "$tmp" >> all-nodes.txt
-
-                  total=$((total + count))
-                  success=$((success + 1))
-                else
-                  echo "⚠️ 可以访问，但没有识别到明文节点"
-                fi
-
-              else
-                echo "⚠️ HTTP $status，跳过"
-                failed=$((failed + 1))
-              fi
-
-            else
-              echo "⚠️ 请求失败，跳过"
-              failed=$((failed + 1))
-            fi
-
-            rm -f "$tmp" "status-$index.txt"
-          done
-
-          echo
-          echo "================================"
-          echo "源统计"
-          echo "================================"
-          echo "总来源：${#SOURCES[@]}"
-          echo "成功来源：$success"
-          echo "失败来源：$failed"
-          echo "抓取节点：$total"
-
-          if [ ! -s all-nodes.txt ]; then
-            echo "❌ 一个节点都没有获取到"
-            exit 1
-          fi
-
-          # 去重
-          sort -u all-nodes.txt > unique-nodes.txt
-
-          unique=$(wc -l < unique-nodes.txt)
-
-          echo "去重后节点：$unique"
-
-          # 暂时最多保留 100 个
-          head -n 100 unique-nodes.txt > sub.txt
-
-          final=$(wc -l < sub.txt)
-
-          echo "最终节点数量：$final"
-
-          echo
-          echo "================================"
-          echo "生成完成"
-          echo "================================"
-
-          cat > daily-report.md <<EOF
-          # Daily Node Update
-
-          - 总来源：${#SOURCES[@]}
-          - 成功来源：$success
-          - 失败来源：$failed
-          - 抓取节点：$total
-          - 去重后节点：$unique
-          - 最终节点：$final
-
-          ## Shadowrocket 订阅地址
-
-          https://twit2er.github.io/daily-node-updater/sub.txt
-          EOF
-
-          echo "订阅文件已生成：sub.txt"
-
       - name: Send email
+        continue-on-error: true
         run: |
           python - <<'PY'
           import json
           import os
           import urllib.request
+          import urllib.error
 
           with open("daily-report.md", "r", encoding="utf-8") as f:
               report = f.read()
@@ -163,6 +16,24 @@ jobs:
                   for x in f
                   if x.strip()
               ]
+
+          email = os.environ.get("EMAIL", "").strip()
+          api_key = os.environ.get("RESEND_API_KEY", "").strip()
+
+          print("================================")
+          print("准备发送邮件")
+          print("================================")
+          print("节点数量：", len(nodes))
+          print("EMAIL Secret：", "已设置" if email else "未设置")
+          print("RESEND_API_KEY：", "已设置" if api_key else "未设置")
+
+          if not email:
+              print("⚠️ EMAIL 未设置，跳过邮件发送。")
+              raise SystemExit(0)
+
+          if not api_key:
+              print("⚠️ RESEND_API_KEY 未设置，跳过邮件发送。")
+              raise SystemExit(0)
 
           html = f"""
           <h2>Daily Node Update</h2>
@@ -190,7 +61,7 @@ jobs:
 
           data = {
               "from": "Daily Update <onboarding@resend.dev>",
-              "to": [os.environ["EMAIL"]],
+              "to": [email],
               "subject": "Daily Update｜节点订阅更新",
               "html": html
           }
@@ -199,33 +70,31 @@ jobs:
               "https://api.resend.com/emails",
               data=json.dumps(data).encode("utf-8"),
               headers={
-                  "Authorization":
-                      "Bearer " + os.environ["RESEND_API_KEY"],
-                  "Content-Type":
-                      "application/json",
-                  "User-Agent":
-                      "daily-node-updater/1.0"
+                  "Authorization": "Bearer " + api_key,
+                  "Content-Type": "application/json",
+                  "User-Agent": "daily-node-updater/1.0"
               },
               method="POST"
           )
 
-          with urllib.request.urlopen(req, timeout=30) as response:
-              print("📧 邮件发送成功")
-              print(response.read().decode("utf-8"))
+          try:
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  result = response.read().decode("utf-8")
+                  print("📧 邮件发送成功")
+                  print(result)
+
+          except urllib.error.HTTPError as e:
+              print("❌ Resend 返回 HTTP 错误：", e.code)
+              print(e.read().decode("utf-8", errors="replace"))
+
+          except Exception as e:
+              print("❌ 邮件发送失败：", repr(e))
+
+          print("================================")
+          print("邮件步骤结束")
+          print("================================")
           PY
 
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           EMAIL: ${{ secrets.EMAIL }}
-
-      - name: Save subscription
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add sub.txt daily-report.md
-
-          git diff --cached --quiet || \
-            git commit -m "Update node subscription"
-
-          git push
