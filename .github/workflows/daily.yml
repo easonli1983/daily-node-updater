@@ -30,96 +30,22 @@ jobs:
 
           curl -L -s https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt >> all.txt || true
 
-          curl -L -s https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub >> all.txt || true
-
 
           grep -Eo '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^ "<>]+' all.txt | sort -u > unique.txt
 
 
-          echo "全部節點:"
+          echo "總節點:"
           wc -l unique.txt
 
 
-
-      - name: Test nodes
+      - name: Select nodes
         run: |
 
-          cat > test.py <<'EOF'
-import socket
-import time
-import urllib.parse
-import concurrent.futures
+          shuf -n 100 unique.txt > final.txt
 
 
-nodes=[]
-
-with open("unique.txt","r",encoding="utf-8") as f:
-    for line in f:
-        line=line.strip()
-        if line:
-            nodes.append(line)
-
-
-def check(node):
-
-    try:
-        u=urllib.parse.urlparse(node)
-
-        host=u.hostname
-        port=u.port
-
-        if not host or not port:
-            return None
-
-        s=socket.socket()
-        s.settimeout(2)
-
-        start=time.time()
-
-        s.connect((host,port))
-
-        delay=int((time.time()-start)*1000)
-
-        s.close()
-
-        return delay,node
-
-    except:
-        return None
-
-
-
-results=[]
-
-with concurrent.futures.ThreadPoolExecutor(max_workers=100) as ex:
-
-    for r in ex.map(check,nodes):
-
-        if r:
-            results.append(r)
-
-
-results.sort(key=lambda x:x[0])
-
-
-print("有效節點:",len(results))
-
-
-with open("final.txt","w",encoding="utf-8") as f:
-
-    for delay,node in results[:100]:
-
-        f.write(node+"\n")
-
-EOF
-
-
-          python3 test.py
-
-
-          echo "最後節點:"
+          echo "最終節點:"
           wc -l final.txt
-
 
 
       - name: Build subscription
@@ -128,7 +54,6 @@ EOF
           base64 -w 0 final.txt > sub.txt
 
           echo >> sub.txt
-
 
 
       - name: Save
