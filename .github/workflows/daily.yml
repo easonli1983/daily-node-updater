@@ -53,31 +53,71 @@ jobs:
 
 
 
-          COUNT=$(wc -l < unique.txt)
-
-          echo "去重節點:"
-          echo $COUNT
+          shuf -n 100 unique.txt > final.txt
 
 
-          if [ "$COUNT" -lt 1 ]; then
-            echo "沒有節點"
+          echo "節點數:"
+          wc -l final.txt
+
+
+
+      - name: Install subconverter
+        run: |
+
+          docker pull ghcr.io/metacubex/subconverter:latest
+
+
+
+      - name: Convert subscription
+        run: |
+
+          docker run -d \
+          --name subconverter \
+          -p 25500:25500 \
+          ghcr.io/metacubex/subconverter:latest
+
+
+          sleep 5
+
+
+          python3 - <<'PY'
+
+import urllib.parse
+
+nodes=[]
+
+with open("final.txt","r",encoding="utf-8") as f:
+    for x in f:
+        if x.strip():
+            nodes.append(x.strip())
+
+
+url="|".join(nodes)
+
+print(urllib.parse.quote(url))
+
+with open("url.txt","w",encoding="utf-8") as f:
+    f.write(urllib.parse.quote(url))
+
+PY
+
+
+          URL=$(cat url.txt)
+
+
+          curl -L \
+          "http://127.0.0.1:25500/sub?target=clash&url=${URL}&emoji=false" \
+          -o clash.yaml
+
+
+          if [ ! -s clash.yaml ]; then
+            echo "轉換失敗"
             exit 1
           fi
 
 
 
-      - name: Select 100 nodes
-        run: |
-
-          shuf -n 100 unique.txt > final.txt
-
-
-          echo "最終節點:"
-          wc -l final.txt
-
-
-
-      - name: Build subscription
+      - name: Build Shadowrocket subscription
         run: |
 
           base64 -w 0 final.txt > sub.txt
@@ -94,7 +134,7 @@ jobs:
           git config user.email "github-actions@github.com"
 
 
-          git add sub.txt
+          git add sub.txt clash.yaml
 
 
           git commit -m "auto update nodes" || true
