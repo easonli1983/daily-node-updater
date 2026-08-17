@@ -21,48 +21,34 @@ jobs:
       - name: Download nodes
         run: |
 
-          rm -f all.txt unique.txt final.txt sub.txt clash.yaml
+          rm -f all.txt unique.txt final.txt sub.txt
 
 
-          curl -L -s \
-          https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt \
-          >> all.txt || true
+          curl -L -s https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt >> all.txt || true
+
+          curl -L -s https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt >> all.txt || true
+
+          curl -L -s https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt >> all.txt || true
+
+          curl -L -s https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub >> all.txt || true
 
 
-          curl -L -s \
-          https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt \
-          >> all.txt || true
+          grep -Eo '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^ "<>]+' all.txt | sort -u > unique.txt
 
 
-          curl -L -s \
-          https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt \
-          >> all.txt || true
-
-
-          curl -L -s \
-          https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub \
-          >> all.txt || true
-
-
-          grep -Eo '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^ "<>]+' \
-          all.txt \
-          | sort -u \
-          > unique.txt
-
-
-          echo "原始節點:"
+          echo "全部節點:"
           wc -l unique.txt
 
 
 
-      - name: Test node speed
+      - name: Test nodes
         run: |
 
-          python3 <<'PY'
-
+          cat > test.py <<'EOF'
 import socket
-import concurrent.futures
+import time
 import urllib.parse
+import concurrent.futures
 
 
 nodes=[]
@@ -74,10 +60,9 @@ with open("unique.txt","r",encoding="utf-8") as f:
             nodes.append(line)
 
 
-def test(node):
+def check(node):
 
     try:
-
         u=urllib.parse.urlparse(node)
 
         host=u.hostname
@@ -86,61 +71,58 @@ def test(node):
         if not host or not port:
             return None
 
-
-        start=__import__("time").time()
-
         s=socket.socket()
-        s.settimeout(3)
+        s.settimeout(2)
+
+        start=time.time()
 
         s.connect((host,port))
 
-        delay=int((__import__("time").time()-start)*1000)
+        delay=int((time.time()-start)*1000)
 
         s.close()
 
-        return (delay,node)
+        return delay,node
 
     except:
-
         return None
 
 
 
-result=[]
+results=[]
 
+with concurrent.futures.ThreadPoolExecutor(max_workers=100) as ex:
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=100) as exe:
-
-    for r in exe.map(test,nodes):
+    for r in ex.map(check,nodes):
 
         if r:
-            result.append(r)
+            results.append(r)
 
 
+results.sort(key=lambda x:x[0])
 
-result.sort(key=lambda x:x[0])
 
-
-print("有效節點:",len(result))
+print("有效節點:",len(results))
 
 
 with open("final.txt","w",encoding="utf-8") as f:
 
-    for delay,node in result[:100]:
+    for delay,node in results[:100]:
 
         f.write(node+"\n")
 
+EOF
 
-PY
+
+          python3 test.py
 
 
-          echo "最終節點:"
+          echo "最後節點:"
           wc -l final.txt
 
 
 
-
-      - name: Build Shadowrocket subscription
+      - name: Build subscription
         run: |
 
           base64 -w 0 final.txt > sub.txt
