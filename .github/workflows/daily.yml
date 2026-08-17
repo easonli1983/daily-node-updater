@@ -2,16 +2,14 @@ name: Daily Node Update
 
 on:
   schedule:
-    - cron: "0 0,8,16 * * *"
+    - cron: "0 */8 * * *"
   workflow_dispatch:
-
 
 permissions:
   contents: write
 
 
 jobs:
-
   update:
 
     runs-on: ubuntu-latest
@@ -19,10 +17,8 @@ jobs:
 
     steps:
 
-
       - name: Checkout
         uses: actions/checkout@v4
-
 
 
       - name: Install tools
@@ -31,31 +27,29 @@ jobs:
           sudo apt-get install -y curl
 
 
-
-      - name: Fetch nodes
+      - name: Download nodes
+        shell: bash
         run: |
 
           rm -f all.txt
           rm -f unique.txt
+          rm -f sub.txt
+          rm -f report.txt
 
 
-          urls=(
-
+          SOURCES=(
           "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt"
-
           "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt"
-
           "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt"
-
           "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub"
-
           )
 
 
-          for url in "${urls[@]}"
+          for url in "${SOURCES[@]}"
           do
 
-            echo "抓取: $url"
+            echo "下載:"
+            echo "$url"
 
             curl -L \
             --connect-timeout 10 \
@@ -66,40 +60,41 @@ jobs:
 
 
 
-          grep -Eo \
-          '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^ "<>]+' \
+          grep -Eo '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^ "<>]+' \
           all.txt \
           | sort -u \
           > unique.txt
 
 
 
-          count=$(wc -l < unique.txt)
+          COUNT=$(wc -l < unique.txt)
 
 
-          echo "找到節點: $count"
+          echo "節點數:"
+          echo "$COUNT"
 
 
+          if [ "$COUNT" -lt 1 ]
+          then
 
-          if [ "$count" -lt 5 ]; then
-
-            echo "節點不足"
-
+            echo "沒有節點"
             exit 1
 
           fi
 
 
 
-      - name: Select nodes
+      - name: Select 100 nodes
         run: |
 
           shuf -n 100 unique.txt > final.txt
 
 
-          echo "保留節點"
+          COUNT=$(wc -l < final.txt)
 
-          wc -l final.txt
+
+          echo "保留:"
+          echo "$COUNT"
 
 
 
@@ -115,38 +110,25 @@ jobs:
       - name: Create report
         run: |
 
-          cat > daily-report.md <<EOF
+          cat > report.txt <<EOF
 
-# Daily Node Update
+Node Update Success
 
-
-更新時間:
-
+Time:
 $(date -u)
 
-
-狀態:
-
-成功
-
-
-節點數:
-
+Nodes:
 $(wc -l < final.txt)
 
-
-訂閱:
+Subscription:
 
 https://twit2er.github.io/daily-node-updater/sub.txt
-
 
 EOF
 
 
 
-
-      - name: Save
-
+      - name: Commit update
         run: |
 
           git config user.name "github-actions"
@@ -154,84 +136,10 @@ EOF
           git config user.email "github-actions@github.com"
 
 
-          git add sub.txt daily-report.md
+          git add sub.txt report.txt
 
 
           git commit -m "auto update nodes" || exit 0
 
 
           git push
-
-
-
-
-      - name: Telegram notify
-
-        if: success()
-
-        run: |
-
-          python3 - <<'PY'
-
-          import os
-          import urllib.request
-          import urllib.parse
-
-
-          token=os.environ["TOKEN"]
-
-          chat=os.environ["CHAT"]
-
-
-          msg="""
-🟢 Node Update Success
-
-更新完成
-
-時間:
-%s
-
-節點:
-%s
-
-訂閱:
-https://twit2er.github.io/daily-node-updater/sub.txt
-""" % (
-
-          __import__("datetime").datetime.now(),
-
-          open("final.txt").read().count("\n")
-
-          )
-
-
-          url=f"https://api.telegram.org/bot{token}/sendMessage"
-
-
-          data=urllib.parse.urlencode({
-
-          "chat_id":chat,
-
-          "text":msg
-
-          }).encode()
-
-
-          urllib.request.urlopen(
-
-          urllib.request.Request(
-          url,
-          data=data
-          )
-
-          )
-
-
-          PY
-
-
-        env:
-
-          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-
-          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
