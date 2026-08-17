@@ -17,22 +17,87 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+
       - name: Download nodes
         run: |
-          curl -L -o nodes.txt https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt
 
-      - name: Extract nodes
+          rm -f all.txt
+          rm -f sub.txt
+
+
+          curl -L -s \
+          https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt \
+          >> all.txt || true
+
+
+          curl -L -s \
+          https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt \
+          >> all.txt || true
+
+
+          curl -L -s \
+          https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt \
+          >> all.txt || true
+
+
+          curl -L -s \
+          https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub \
+          >> all.txt || true
+
+
+
+          grep -Eo '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^ "<>]+' \
+          all.txt \
+          | sort -u \
+          > unique.txt
+
+
+
+          COUNT=$(wc -l < unique.txt)
+
+          echo "去重節點:"
+          echo $COUNT
+
+
+          if [ "$COUNT" -lt 1 ]; then
+            echo "沒有節點"
+            exit 1
+          fi
+
+
+
+      - name: Select 100 nodes
         run: |
-          grep -Eo '(vmess|vless|trojan|ss)://[^ "<>]+' nodes.txt > sub.txt || true
-          wc -l sub.txt
+
+          shuf -n 100 unique.txt > final.txt
+
+
+          echo "最終節點:"
+          wc -l final.txt
+
+
+
+      - name: Build subscription
+        run: |
+
+          base64 -w 0 final.txt > sub.txt
+
+          echo >> sub.txt
+
+
 
       - name: Save
         run: |
+
           git config user.name "github-actions"
+
           git config user.email "github-actions@github.com"
+
 
           git add sub.txt
 
-          git commit -m "auto update" || true
+
+          git commit -m "auto update nodes" || true
+
 
           git push
