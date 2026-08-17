@@ -21,8 +21,7 @@ jobs:
       - name: Download nodes
         run: |
 
-          rm -f all.txt
-          rm -f sub.txt
+          rm -f all.txt unique.txt final.txt sub.txt clash.yaml
 
 
           curl -L -s \
@@ -45,75 +44,99 @@ jobs:
           >> all.txt || true
 
 
-
           grep -Eo '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^ "<>]+' \
           all.txt \
           | sort -u \
           > unique.txt
 
 
-
-          shuf -n 100 unique.txt > final.txt
-
-
-          echo "節點數:"
-          wc -l final.txt
+          echo "原始節點:"
+          wc -l unique.txt
 
 
 
-      - name: Install subconverter
+      - name: Test node speed
         run: |
 
-          docker pull ghcr.io/metacubex/subconverter:latest
+          python3 <<'PY'
 
-
-
-      - name: Convert subscription
-        run: |
-
-          docker run -d \
-          --name subconverter \
-          -p 25500:25500 \
-          ghcr.io/metacubex/subconverter:latest
-
-
-          sleep 5
-
-
-          python3 - <<'PY'
-
+import socket
+import concurrent.futures
 import urllib.parse
+
 
 nodes=[]
 
-with open("final.txt","r",encoding="utf-8") as f:
-    for x in f:
-        if x.strip():
-            nodes.append(x.strip())
+with open("unique.txt","r",encoding="utf-8") as f:
+    for line in f:
+        line=line.strip()
+        if line:
+            nodes.append(line)
 
 
-url="|".join(nodes)
+def test(node):
 
-print(urllib.parse.quote(url))
+    try:
 
-with open("url.txt","w",encoding="utf-8") as f:
-    f.write(urllib.parse.quote(url))
+        u=urllib.parse.urlparse(node)
+
+        host=u.hostname
+        port=u.port
+
+        if not host or not port:
+            return None
+
+
+        start=__import__("time").time()
+
+        s=socket.socket()
+        s.settimeout(3)
+
+        s.connect((host,port))
+
+        delay=int((__import__("time").time()-start)*1000)
+
+        s.close()
+
+        return (delay,node)
+
+    except:
+
+        return None
+
+
+
+result=[]
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=100) as exe:
+
+    for r in exe.map(test,nodes):
+
+        if r:
+            result.append(r)
+
+
+
+result.sort(key=lambda x:x[0])
+
+
+print("有效節點:",len(result))
+
+
+with open("final.txt","w",encoding="utf-8") as f:
+
+    for delay,node in result[:100]:
+
+        f.write(node+"\n")
+
 
 PY
 
 
-          URL=$(cat url.txt)
+          echo "最終節點:"
+          wc -l final.txt
 
-
-          curl -L \
-          "http://127.0.0.1:25500/sub?target=clash&url=${URL}&emoji=false" \
-          -o clash.yaml
-
-
-          if [ ! -s clash.yaml ]; then
-            echo "轉換失敗"
-            exit 1
-          fi
 
 
 
@@ -134,7 +157,7 @@ PY
           git config user.email "github-actions@github.com"
 
 
-          git add sub.txt clash.yaml
+          git add sub.txt
 
 
           git commit -m "auto update nodes" || true
