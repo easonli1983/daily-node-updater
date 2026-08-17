@@ -5,6 +5,7 @@ on:
     - cron: "0 0,8,16 * * *"
   workflow_dispatch:
 
+
 permissions:
   contents: write
 
@@ -18,213 +19,123 @@ jobs:
 
     steps:
 
-    - name: Checkout
-      uses: actions/checkout@v4
 
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Install
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y python3 python3-pip curl
 
 
-    - name: Fetch nodes
-      run: |
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl
 
-        rm -f all.txt
 
-        urls=(
 
-        "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt"
+      - name: Fetch nodes
+        run: |
 
-        "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt"
+          rm -f all.txt
+          rm -f unique.txt
 
-        "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt"
 
-        "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub"
+          urls=(
 
-        )
+          "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/nodes.txt"
 
+          "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt"
 
-        for url in "${urls[@]}"
-        do
+          "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt"
 
-          echo "抓取 $url"
+          "https://raw.githubusercontent.com/free-nodes/v2rayfree/main/sub"
 
-          curl -L \
-          --connect-timeout 10 \
-          --max-time 30 \
-          -s "$url" >> all.txt || true
+          )
 
-        done
 
+          for url in "${urls[@]}"
+          do
 
+            echo "抓取: $url"
 
-        grep -Eo \
-        '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^" <>()]+' \
-        all.txt \
-        | sort -u \
-        > unique.txt
+            curl -L \
+            --connect-timeout 10 \
+            --max-time 40 \
+            -s "$url" >> all.txt || true
 
+          done
 
 
-        count=$(wc -l < unique.txt)
 
-        echo "節點數 $count"
+          grep -Eo \
+          '(vmess|vless|trojan|ss|hysteria2|hysteria)://[^ "<>]+' \
+          all.txt \
+          | sort -u \
+          > unique.txt
 
 
 
-        if [ "$count" -lt 10 ]
-        then
+          count=$(wc -l < unique.txt)
 
-          echo "節點不足"
 
-          exit 1
+          echo "找到節點: $count"
 
-        fi
 
 
+          if [ "$count" -lt 5 ]; then
 
-    - name: Random test 200 nodes
-      run: |
+            echo "節點不足"
 
-        shuf -n 200 unique.txt > test.txt
+            exit 1
 
+          fi
 
 
-    - name: Speed test
-      run: |
 
-        python3 <<'PY'
+      - name: Select nodes
+        run: |
 
-        import socket
-        import time
-        import random
+          shuf -n 100 unique.txt > final.txt
 
 
-        nodes=[]
+          echo "保留節點"
 
+          wc -l final.txt
 
-        with open("test.txt") as f:
 
-            nodes=[
-                x.strip()
-                for x in f
-                if x.strip()
-            ]
 
+      - name: Build subscription
+        run: |
 
-        result=[]
+          base64 -w 0 final.txt > sub.txt
 
+          echo >> sub.txt
 
-        for i,node in enumerate(nodes):
 
-            start=time.time()
 
+      - name: Create report
+        run: |
 
-            try:
-
-                host=node.split("://")[1].split(":")[0]
-
-                socket.setdefaulttimeout(3)
-
-                socket.gethostbyname(host)
-
-
-                delay=int(
-                    (time.time()-start)*1000
-                )
-
-
-                if delay < 3000:
-
-                    result.append(
-                        (delay,node)
-                    )
-
-
-            except:
-
-                pass
-
-
-            print(
-                i,
-                "完成"
-            )
-
-
-        result.sort(
-            key=lambda x:x[0]
-        )
-
-
-        result=result[:100]
-
-
-        with open(
-            "best.txt",
-            "w"
-        ) as f:
-
-
-            for delay,node in result:
-
-                f.write(
-                    node+"\n"
-                )
-
-
-        print(
-            "保留",
-            len(result)
-        )
-
-
-        if len(result)<5:
-
-            raise Exception(
-                "有效節點太少"
-            )
-
-
-        PY
-
-
-
-    - name: Build subscription
-      run: |
-
-        base64 -w 0 best.txt > sub.txt
-
-        echo >> sub.txt
-
-
-
-    - name: Report
-      run: |
-
-        cat > daily-report.md <<EOF
+          cat > daily-report.md <<EOF
 
 # Daily Node Update
 
 
-更新時間：
+更新時間:
 
 $(date -u)
 
 
-狀態：
+狀態:
 
 成功
 
 
-保留節點：
+節點數:
 
-$(wc -l < best.txt)
+$(wc -l < final.txt)
 
 
-訂閱：
+訂閱:
 
 https://twit2er.github.io/daily-node-updater/sub.txt
 
@@ -233,94 +144,94 @@ EOF
 
 
 
-    - name: Commit
 
-      run: |
+      - name: Save
 
-        git config user.name github-actions
+        run: |
 
-        git config user.email github-actions@github.com
+          git config user.name "github-actions"
 
-
-        git add sub.txt daily-report.md
+          git config user.email "github-actions@github.com"
 
 
-        git commit -m "auto update nodes" || exit 0
+          git add sub.txt daily-report.md
 
 
-        git push
+          git commit -m "auto update nodes" || exit 0
+
+
+          git push
 
 
 
-    - name: Telegram
 
-      if: success()
+      - name: Telegram notify
 
-      run: |
+        if: success()
 
-        python3 <<'PY'
+        run: |
 
-        import os
-        import urllib.request
-        import urllib.parse
+          python3 - <<'PY'
 
-
-        token=os.environ["TOKEN"]
-
-        chat=os.environ["CHAT"]
+          import os
+          import urllib.request
+          import urllib.parse
 
 
-        text="""
+          token=os.environ["TOKEN"]
 
-🟢 节点自动更新完成
+          chat=os.environ["CHAT"]
 
 
-时间:
+          msg="""
+🟢 Node Update Success
 
+更新完成
+
+時間:
 %s
 
+節點:
+%s
 
-节点:
-
-%s 个
-
-
+訂閱:
+https://twit2er.github.io/daily-node-updater/sub.txt
 """ % (
 
-        __import__("datetime").datetime.now(),
+          __import__("datetime").datetime.now(),
 
-        open("best.txt").read().count("\n")
+          open("final.txt").read().count("\n")
 
-        )
-
-
-        url=f"https://api.telegram.org/bot{token}/sendMessage"
+          )
 
 
-        data=urllib.parse.urlencode({
-
-        "chat_id":chat,
-
-        "text":text
-
-        }).encode()
+          url=f"https://api.telegram.org/bot{token}/sendMessage"
 
 
-        urllib.request.urlopen(
+          data=urllib.parse.urlencode({
 
-        urllib.request.Request(
-            url,
-            data=data
-        )
+          "chat_id":chat,
 
-        )
+          "text":msg
 
-
-        PY
+          }).encode()
 
 
-      env:
+          urllib.request.urlopen(
 
-        TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          urllib.request.Request(
+          url,
+          data=data
+          )
 
-        CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          )
+
+
+          PY
+
+
+        env:
+
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
